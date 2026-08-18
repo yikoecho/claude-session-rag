@@ -68,7 +68,7 @@ else
   semantic_top_k=3
 fi
 
-curl -s -G "$SEARCH_SERVER/search" \
+curl -s --max-time 8 -G "$SEARCH_SERVER/search" \
   --data-urlencode "q=$prompt" \
   --data-urlencode "top_k=$semantic_top_k" \
   --data-urlencode "threshold=0.45" \

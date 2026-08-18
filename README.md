@@ -134,6 +134,12 @@ Another day's summary...
 
 See `data/session_archive.example.md` for a complete example.
 
+## Privacy Warning
+
+> **Your session archive may contain sensitive information** — API keys, personal details, internal URLs, or private conversations — that ends up embedded in the vector index and injected back into future prompts.
+>
+> Before indexing, review your archive and redact or exclude any secrets. Consider using a `.env`-only approach for credentials and never logging them to session summaries.
+
 ## Limitations / TODO
 
 - **Chunk splitting**: currently splits on `---` only. Long sections (>2000 chars) are truncated rather than split semantically. Overlapping sliding-window chunking would improve recall on long summaries.
