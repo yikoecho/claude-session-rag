@@ -216,3 +216,11 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+# Project-specific
+.env
+data/*.jsonl
+data/*.md
+!data/session_archive.example.md
+data/lancedb/
+*.log
