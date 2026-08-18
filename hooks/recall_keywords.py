@@ -47,7 +47,7 @@ def extract_terms(prompt: str) -> tuple[str, str]:
         return "", ""
 
     # Use top 3 most distinctive words for grep
-    search_terms = " ".join(keywords[:3])
+    search_terms = "|".join(keywords[:3])
 
     # For semantic search, use the original prompt (or a reformulation)
     # Return empty to signal "use original prompt"

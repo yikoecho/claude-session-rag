@@ -35,7 +35,7 @@ fi
 # recall_keywords.py reads stdin (the prompt) and outputs:
 #   line 1: search_terms (for grep)
 #   line 2: retro_query (for semantic search, if different)
-py_out=$(echo "$prompt" | python3 "$(dirname "$0")/../recall_keywords.py" 2>/dev/null)
+py_out=$(echo "$prompt" | python3 "$(dirname "$0")/recall_keywords.py" 2>/dev/null)
 search_terms=$(echo "$py_out" | sed -n '1p')
 retro_query=$(echo "$py_out" | sed -n '2p')
 
@@ -51,13 +51,13 @@ results=""
 
 # Grep session file if available
 if [ -n "$SESSION_FILE" ] && [ -f "$SESSION_FILE" ]; then
-  hits=$(rg -i -m 3 --no-filename "$search_terms" "$SESSION_FILE" 2>/dev/null | head -3)
+  hits=$(rg -i -m 3 --no-filename "$search_terms" "$SESSION_FILE" 2>/dev/null | head -3) || true
   [ -n "$hits" ] && results="$results$hits\n"
 fi
 
 # Grep memory directory if configured
 if [ -n "$MEMORY_DIR" ] && [ -d "$MEMORY_DIR" ]; then
-  hits=$(rg -i -m 5 --no-filename "$search_terms" "$MEMORY_DIR" 2>/dev/null | head -5)
+  hits=$(rg -i -m 5 --no-filename "$search_terms" "$MEMORY_DIR" 2>/dev/null | head -5) || true
   [ -n "$hits" ] && results="$results$hits\n"
 fi
 
@@ -93,11 +93,11 @@ fi
 # ── Layer 3: Haiku filter (optional) ──
 # If search_server has OPENROUTER_API_KEY set, /recall filters with Haiku.
 # If not, it passes candidates through unchanged.
-recall_result=$(echo "$formatted" | python3 -c "
-import sys, json, urllib.request
+recall_result=$(echo "$formatted" | PROMPT_TEXT="$prompt" python3 -c "
+import sys, json, urllib.request, os
 
 lines = [l.strip() for l in sys.stdin if l.strip()]
-prompt = '''$prompt'''
+prompt = os.environ['PROMPT_TEXT']
 
 data = json.dumps({'prompt': prompt, 'candidates': lines}).encode()
 req = urllib.request.Request(

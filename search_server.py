@@ -113,10 +113,14 @@ def search(query: str, top_k: int = 3, threshold: float = 0.45) -> str:
         for _, row in fts_results.iterrows():
             cid = row["chunk_id"]
             if cid not in merged:
+                if threshold > 0.5:
+                    continue
                 merged[cid] = {"row": row, "score": 0.5}
 
+    ranked = sorted(merged.values(), key=lambda x: x["score"], reverse=True)[:top_k]
+
     lines = []
-    for item in merged.values():
+    for item in ranked:
         row = item["row"]
         date = str(row["timestamp_start"])[:10]
         snippet = row["text"][:120].replace("\n", " ")

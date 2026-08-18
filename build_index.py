@@ -74,7 +74,7 @@ def parse_archive(filepath: str) -> list[dict]:
         session_match = re.search(r'##\s+Session[：:]\s*([^\n]+)', section)
         session_id = session_match.group(1).strip() if session_match else "unknown"
 
-        chunk_id = hashlib.md5(section[:200].encode()).hexdigest()
+        chunk_id = hashlib.md5(section.encode()).hexdigest()
 
         # Truncate overly long sections
         content = section if len(section) <= 2000 else section[:2000]
@@ -110,7 +110,7 @@ def embed_batch(texts: list[str], client: openai.OpenAI) -> list[list[float]]:
 def get_processed_chunks(db) -> set:
     try:
         table = db.open_table(TABLE_NAME)
-        return set(row["chunk_id"] for row in table.to_arrow().to_pydict()["chunk_id"])
+        return set(table.to_arrow().to_pydict()["chunk_id"])
     except Exception:
         return set()
 
