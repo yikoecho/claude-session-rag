@@ -41,7 +41,10 @@ RETRO_MAP = {
     "那时":   "那时候",
 }
 
-text = sys.stdin.read().strip()[:200]
+import re
+raw = sys.stdin.read().strip()
+# Strip XML/HTML channel wrapper tags (e.g. Telegram plugin injects <channel ...>...</channel>)
+text = re.sub(r'<[^>]+>', '', raw).strip()[:300]
 words = [w for w in jieba.lcut(text) if w not in STOPWORDS and len(w) >= 2]
 keywords = words[:5]
 
