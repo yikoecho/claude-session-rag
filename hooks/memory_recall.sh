@@ -13,13 +13,22 @@ if [ -z "$prompt" ]; then
   exit 0
 fi
 
+# ── Configurable script paths (override via env vars or fall back to script dir) ──
+SCRIPT_DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" && pwd )"
+NOTICE_FILTER_SCRIPT="${NOTICE_FILTER_SCRIPT:-${SCRIPT_DIR}/notice_filter.py}"
+RECALL_KEYWORDS_SCRIPT="${RECALL_KEYWORDS_SCRIPT:-${SCRIPT_DIR}/recall_keywords.py}"
+
+# Fall back to legacy absolute paths if not found relative to script dir
+[ -f "$NOTICE_FILTER_SCRIPT" ]   || NOTICE_FILTER_SCRIPT="/root/notice_filter.py"
+[ -f "$RECALL_KEYWORDS_SCRIPT" ] || RECALL_KEYWORDS_SCRIPT="/root/recall_keywords.py"
+
 # ── Layer 1: Notice 规则层（替代原来的 10字过滤）──
-notice_result=$(echo "$prompt" | python3 /root/notice_filter.py 2>/dev/null)
+notice_result=$(echo "$prompt" | python3 "$NOTICE_FILTER_SCRIPT" 2>/dev/null)
 if [ "$notice_result" = "SKIP" ]; then
   exit 0
 fi
 
-py_out=$(echo "$prompt" | python3 /root/recall_keywords.py 2>/dev/null)
+py_out=$(echo "$prompt" | python3 "$RECALL_KEYWORDS_SCRIPT" 2>/dev/null)
 search_terms=$(echo "$py_out" | sed -n '1p')
 retro_query=$(echo "$py_out" | sed -n '2p')
 
@@ -95,10 +104,18 @@ curl -s -G "http://127.0.0.1:15200/hybrid" \
   > "$TMPDIR_RECALL/hybrid" 2>/dev/null &
 pid_hybrid=$!
 
-python3 /root/breath_search.py "$ob_query" > "$TMPDIR_RECALL/ob" 2>/dev/null &
-pid_ob=$!
+BREATH_SCRIPT="${BREATH_SEARCH_SCRIPT:-${SCRIPT_DIR}/breath_search.py}"
+[ -f "$BREATH_SCRIPT" ] || BREATH_SCRIPT="/root/breath_search.py"
 
-wait $pid_hybrid $pid_ob
+if [ -f "$BREATH_SCRIPT" ]; then
+  python3 "$BREATH_SCRIPT" "$ob_query" > "$TMPDIR_RECALL/ob" 2>/dev/null &
+  pid_ob=$!
+  wait $pid_hybrid $pid_ob
+  ob_hits=$(cat "$TMPDIR_RECALL/ob")
+else
+  wait $pid_hybrid
+  ob_hits=""
+fi
 
 # 解析 hybrid JSON → 文本行
 hybrid_hits=$(python3 -c "
@@ -110,7 +127,6 @@ try:
 except Exception:
     pass
 " 2>/dev/null)
-ob_hits=$(cat "$TMPDIR_RECALL/ob")
 
 [ -n "$hybrid_hits" ] && results="$results[archive_hybrid]\n$hybrid_hits\n"
 [ -n "$ob_hits" ]     && results="$results[OB记忆]\n$ob_hits\n"

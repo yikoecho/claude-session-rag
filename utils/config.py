@@ -17,13 +17,24 @@ if _env.exists():
 EMBEDDING_API_KEY = os.environ.get("EMBEDDING_API_KEY", "ollama")
 EMBEDDING_BASE_URL = os.environ.get("EMBEDDING_BASE_URL", "http://172.18.0.2:11434/v1")
 EMBEDDING_MODEL = os.environ.get("EMBEDDING_MODEL", "bge-m3")
-LANCE_DB_PATH = os.environ.get("LANCE_DB_PATH", "/root/semantic/memory_db")
+LANCE_DB_PATH = os.environ.get(
+    "LANCE_DB_PATH",
+    os.path.join(os.path.dirname(os.path.dirname(__file__)), "memory_db"),
+)
 TABLE_NAME = "conversations"
-JSONL_DIR = Path("/root/.claude/projects/-root")
-PORT = 15200
+JSONL_DIR = Path(
+    os.environ.get("JSONL_DIR", os.path.expanduser("~/.claude/projects/-root"))
+)
+PORT = int(os.environ.get("SEARCH_PORT", "15200"))
 
-ARCHIVE_FILE = Path("/root/.claude/session_archive.md")
-JSONL_INDEX_FILE = Path("/root/.claude/session_index.jsonl")
+ARCHIVE_FILE = Path(
+    os.environ.get("ARCHIVE_FILE", os.path.expanduser("~/.claude/session_archive.md"))
+)
+JSONL_INDEX_FILE = Path(
+    os.environ.get(
+        "JSONL_INDEX_FILE", os.path.expanduser("~/.claude/session_index.jsonl")
+    )
+)
 
 # Recall Agent
 OPENROUTER_API_KEY = os.environ.get("OPENROUTER_API_KEY", "")

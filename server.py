@@ -18,7 +18,7 @@ from urllib.parse import urlparse, parse_qs
 from utils.config import PORT, RECALL_ENABLED, RECALL_MODEL
 from index.bm25 import build_bm25_index, bm25_search, reload_bm25_async
 from index.vector import vector_search_raw  # noqa: F401 — triggers LanceDB init
-from rag.hybrid import hybrid_search, search
+from rag.hybrid import hybrid_search
 from rag.recall import recall_agent
 
 # 启动 BM25 索引
@@ -86,31 +86,18 @@ class Handler(BaseHTTPRequestHandler):
             self.wfile.write(body)
             return
 
-        if parsed.path != "/search":
-            self.send_response(404)
+        if parsed.path == "/search":
+            # Deprecated: use /hybrid instead
+            body = b'{"error": "deprecated", "message": "Use /hybrid instead of /search"}'
+            self.send_response(410)
+            self.send_header("Content-Type", "application/json; charset=utf-8")
+            self.send_header("Content-Length", str(len(body)))
             self.end_headers()
+            self.wfile.write(body)
             return
 
-        top_k = int(params.get("top_k", [3])[0])
-        threshold = float(params.get("threshold", [0.45])[0])
-
-        if not query:
-            self.send_response(400)
-            self.end_headers()
-            return
-
-        try:
-            result = search(query, top_k, threshold)
-        except Exception as e:
-            result = ""
-            print(f"[search_server] 搜索出错: {e}")
-
-        body = result.encode("utf-8")
-        self.send_response(200)
-        self.send_header("Content-Type", "text/plain; charset=utf-8")
-        self.send_header("Content-Length", str(len(body)))
+        self.send_response(404)
         self.end_headers()
-        self.wfile.write(body)
 
     def do_POST(self):
         parsed = urlparse(self.path)

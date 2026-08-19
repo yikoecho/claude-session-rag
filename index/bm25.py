@@ -7,17 +7,34 @@ import re
 import threading
 from pathlib import Path
 
+import jieba
 from rank_bm25 import BM25Okapi
 
 from utils.config import ARCHIVE_FILE, JSONL_INDEX_FILE
+
+# 加载 jieba 时静默
+jieba.setLogLevel("CRITICAL")
 
 _bm25_chunks: list[str] = []
 _bm25_index: BM25Okapi | None = None
 _bm25_lock = threading.Lock()
 
 
+_CHINESE_RE = re.compile(r"[一-鿿㐀-䶿]+")
+
+
 def _tokenize(text: str) -> list[str]:
-    return re.findall(r"[\w一-鿿]+", text.lower())
+    """混合分词：中文用 jieba，英文/数字用正则。"""
+    tokens: list[str] = []
+    # 先用 jieba 切中文词
+    for word in jieba.cut(text):
+        word = word.strip()
+        if word and _CHINESE_RE.fullmatch(word):
+            tokens.append(word)
+    # 再用正则提取非中文 token（英文单词、数字等）
+    non_chinese = _CHINESE_RE.sub(" ", text.lower())
+    tokens.extend(re.findall(r"[a-z0-9_]+", non_chinese))
+    return tokens
 
 
 def build_bm25_index() -> None:

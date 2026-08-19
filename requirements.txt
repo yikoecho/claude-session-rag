@@ -1,0 +1,7 @@
+rank_bm25
+jieba
+lancedb
+openai
+pyarrow
+httpx
+flask
