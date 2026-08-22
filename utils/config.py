@@ -39,7 +39,7 @@ JSONL_INDEX_FILE = Path(
 )
 
 # ---- LLM backend (recall filter + entity enrichment) ----
-# LLM_BACKEND: "none" | "ollama" | "openrouter"
+# LLM_BACKEND: "none" | "ollama" | "siliconflow" | "api" | "openrouter"
 OPENROUTER_API_KEY = os.environ.get("OPENROUTER_API_KEY", "")
 
 # 向后兼容：老变量 RECALL_API_KEY / RECALL_BASE_URL 仍可用
@@ -56,7 +56,12 @@ if LLM_BACKEND == "ollama":
     LLM_API_KEY = "ollama"
     RECALL_MODEL = os.environ.get("RECALL_MODEL", "qwen2.5:3b")
     ENRICH_MODEL = os.environ.get("ENRICH_MODEL", "qwen2.5:3b")
-else:  # openrouter（none 时这些值用不到）
+elif LLM_BACKEND == "siliconflow":
+    LLM_BASE_URL = os.environ.get("SILICONFLOW_BASE_URL", "https://api.siliconflow.cn/v1")
+    LLM_API_KEY = os.environ.get("SILICONFLOW_API_KEY") or os.environ.get("EMBEDDING_API_KEY", "")
+    RECALL_MODEL = os.environ.get("RECALL_MODEL", "Qwen/Qwen3-8B")
+    ENRICH_MODEL = os.environ.get("ENRICH_MODEL", "Qwen/Qwen3-8B")
+else:  # api / openrouter（none 时这些值用不到）
     LLM_BASE_URL = _legacy_base_url or "https://openrouter.ai/api/v1"
     LLM_API_KEY = OPENROUTER_API_KEY or _legacy_api_key
     RECALL_MODEL = os.environ.get("RECALL_MODEL", "anthropic/claude-haiku-4-5")

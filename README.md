@@ -131,7 +131,8 @@ All config via environment variables (or `.env` file). Variable names below matc
 | `JSONL_DIR`            | `~/.claude/projects/-root`       | Directory of raw `*.jsonl` sessions (build + fallback)  |
 | `SEARCH_PORT`          | `15200`                          | Port for the search server                              |
 | `OPENROUTER_API_KEY`   | —                                | Optional: enables the Haiku recall filter (OpenRouter)  |
-| `LLM_BACKEND`          | auto (`openrouter` or `none`)    | LLM backend: `none` \| `ollama` \| `openrouter`        |
+| `SILICONFLOW_API_KEY`  | —                                | Optional: SiliconFlow API key (or reuse `EMBEDDING_API_KEY`) |
+| `LLM_BACKEND`          | auto (`openrouter` or `none`)    | LLM backend: `none` \| `siliconflow` \| `ollama` \| `api` \| `openrouter` |
 | `OLLAMA_BASE_URL`      | `http://127.0.0.1:11434/v1`      | Ollama API base URL (only used when `LLM_BACKEND=ollama`) |
 | `LLM_BASE_URL`         | derived from backend             | Override the LLM API base URL directly                  |
 | `LLM_API_KEY`          | derived from backend             | Override the LLM API key directly                       |
@@ -140,15 +141,19 @@ All config via environment variables (or `.env` file). Variable names below matc
 
 ## LLM Backend
 
-The recall filter and entity enrichment both use an LLM. Three modes are available:
+The recall filter and entity enrichment both use an LLM. Five modes are available:
 
-| `LLM_BACKEND` | Cost | Setup |
-|---|---|---|
-| `none` | Free | Pure vector+BM25 retrieval, no filtering. Lower precision. |
-| `ollama` | Free (local) | Run `ollama pull qwen2.5:3b` first, then start Ollama. Set `LLM_BACKEND=ollama`. |
-| `openrouter` | Paid | Set `OPENROUTER_API_KEY`. Auto-selected when the key is present. |
+| 模式 | 费用 | 说明 |
+|------|------|------|
+| `none` | 免费 | 零配置，无 LLM，纯向量+BM25 |
+| `siliconflow` | 免费 | 远程 API，需注册 siliconflow.cn，可复用 `EMBEDDING_API_KEY` |
+| `ollama` | 免费 | 本地推理，需先 `ollama pull Qwen/Qwen3-8B` |
+| `api` | 付费 | 任意 OpenAI 兼容接口，填 `LLM_BASE_URL` + `LLM_API_KEY` + `RECALL_MODEL` |
+| `openrouter` | 付费 | 同 `api`，旧名称，向后兼容 |
 
-The backend is auto-detected: if `OPENROUTER_API_KEY` is set, `openrouter` is used; otherwise `none`. Override with `LLM_BACKEND=ollama`.
+我们自己使用 `RECALL_MODEL=anthropic/claude-haiku-4-5`（通过 OpenRouter），其他可选：`deepseek/deepseek-chat`、`google/gemini-flash-1.5`、`openai/gpt-4o-mini`。SiliconFlow 免费可用：`Qwen/Qwen3-8B`、`Qwen/Qwen2.5-7B-Instruct`、`Pro/deepseek-ai/DeepSeek-R1`。
+
+The backend is auto-detected: if `OPENROUTER_API_KEY` is set, `openrouter` is used; otherwise `none`. Override with `LLM_BACKEND=siliconflow` or `LLM_BACKEND=ollama`.
 
 Legacy variables `RECALL_API_KEY` and `RECALL_BASE_URL` are still recognized for backward compatibility.
 
