@@ -129,6 +129,7 @@ class Handler(BaseHTTPRequestHandler):
 
 
 if __name__ == "__main__":
+    # Bind loopback only — this server has no auth and must never be exposed.
     server = HTTPServer(("127.0.0.1", PORT), Handler)
     print(f"[search_server] 监听 127.0.0.1:{PORT}")
     server.serve_forever()

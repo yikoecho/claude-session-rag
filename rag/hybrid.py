@@ -37,7 +37,8 @@ def hybrid_search(query: str, top_k: int = 5) -> list[dict]:
     try:
         table = get_table()
         if table is not None:
-            kw_rows = table.search().where(f"text LIKE '%{query}%'").limit(top_k).to_list()
+            safe_q = query.replace("'", "''")
+            kw_rows = table.search().where(f"text LIKE '%{safe_q}%'").limit(top_k).to_list()
             kw_items = []
             existing_texts = {r["text"][:80] for r in results}
             for row in kw_rows:
@@ -74,7 +75,7 @@ def _jsonl_fallback(query: str, context_window: int = 3) -> str:
     """最早命中行（带前后 context_window 条上下文）+ 最新命中行（只取命中行）。"""
     try:
         grep_result = subprocess.run(
-            ["grep", "-F", "-r", "-n", "--include=*.jsonl", query, str(JSONL_DIR)],
+            ["grep", "-F", "-r", "-n", "--include=*.jsonl", "--", query, str(JSONL_DIR)],
             capture_output=True, text=True, timeout=5
         )
     except Exception:
@@ -183,7 +184,8 @@ def search(query: str, top_k: int = 3, threshold: float = 0.45) -> str:
 
     # 精确关键词匹配（绕过 FTS 的中文分词问题）
     try:
-        kw_rows = table.search().where(f"text LIKE '%{query}%'").limit(top_k).to_list()
+        safe_q = query.replace("'", "''")
+        kw_rows = table.search().where(f"text LIKE '%{safe_q}%'").limit(top_k).to_list()
         for row in kw_rows:
             cid = row["chunk_id"]
             merged[cid] = {"row": row, "score": 0.8}

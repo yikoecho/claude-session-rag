@@ -66,7 +66,11 @@ def recall_agent(prompt: str, candidates: list[str]) -> list[str]:
             print(f"[recall_agent] 返回空（{result.get('reason', '')}）")
             return []
 
-        filtered = [candidates[i] for i in keep_indices if i < len(candidates)]
+        filtered = [
+            candidates[i]
+            for i in keep_indices
+            if isinstance(i, int) and 0 <= i < len(candidates)
+        ]
         print(f"[recall_agent] {len(candidates)}→{len(filtered)} ({result.get('reason', '')})")
         return filtered
 

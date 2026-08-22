@@ -5,11 +5,12 @@ build_index.py — session_archive.md + JSONL → LanceDB 语义索引
   python build_index.py                   # 使用默认路径
   python build_index.py /path/to/archive.md
 
-环境变量（从 /root/.env 读）:
+环境变量（从 <repo>/.env 读，回退 /root/.env）:
   EMBEDDING_API_KEY=sk-...
-  LANCE_DB_PATH=./memory_db        (可选，默认 /root/semantic/memory_db)
-  EMBEDDING_MODEL=text-embedding-v3  (可选)
-  JSONL_DIR=/root/.claude/projects/-root  (可选，JSONL数据源目录)
+  LANCE_DB_PATH=<repo>/data/lancedb        (可选)
+  EMBEDDING_MODEL=BAAI/bge-m3              (可选)
+  SESSION_ARCHIVE_PATH=<repo>/data/session_archive.md  (可选)
+  JSONL_DIR=~/.claude/projects/-root       (可选，JSONL数据源目录)
 """
 
 import os
@@ -21,8 +22,10 @@ import time
 from pathlib import Path
 from datetime import datetime
 
-# 读 /root/.env
-_env_path = Path("/root/.env")
+# Load .env (repo dir first, then legacy /root/.env for backward compat)
+_env_path = Path(__file__).parent / ".env"
+if not _env_path.exists():
+    _env_path = Path("/root/.env")
 if _env_path.exists():
     for line in _env_path.read_text().splitlines():
         line = line.strip()
@@ -37,14 +40,20 @@ import tiktoken
 
 # ─── 配置 ───
 EMBEDDING_API_KEY = os.environ.get("EMBEDDING_API_KEY", "ollama")
-LANCE_DB_PATH = os.environ.get("LANCE_DB_PATH", "/root/semantic/memory_db")
+LANCE_DB_PATH = os.environ.get(
+    "LANCE_DB_PATH",
+    os.path.join(os.path.dirname(__file__), "data", "lancedb"),
+)
 EMBEDDING_MODEL = os.environ.get("EMBEDDING_MODEL", "bge-m3")
-EMBEDDING_BASE_URL = os.environ.get("EMBEDDING_BASE_URL", "http://172.18.0.2:11434/v1")
+EMBEDDING_BASE_URL = os.environ.get("EMBEDDING_BASE_URL", "https://api.siliconflow.cn/v1")
 EMBEDDING_DIM = 1024
 BATCH_SIZE = 20
 
-ARCHIVE_PATH = "/root/.claude/session_archive.md"
-JSONL_DIR = os.environ.get("JSONL_DIR", "/root/.claude/projects/-root")
+ARCHIVE_PATH = os.environ.get(
+    "SESSION_ARCHIVE_PATH",
+    os.path.join(os.path.dirname(__file__), "data", "session_archive.md"),
+)
+JSONL_DIR = os.environ.get("JSONL_DIR", os.path.expanduser("~/.claude/projects/-root"))
 TABLE_NAME = "conversations"
 
 CHUNK_TOKENS = 400

@@ -1,7 +1,7 @@
-rank_bm25
+httpx
 jieba
 lancedb
 openai
 pyarrow
-httpx
-flask
+rank_bm25
+tiktoken
