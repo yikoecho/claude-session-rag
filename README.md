@@ -158,11 +158,38 @@ Another day's summary...
 
 See `data/session_archive.example.md` for a complete example.
 
+## Hooks
+
+### UserPromptSubmit — `hooks/recall_keywords.py`
+
+Extracts search keywords from the user's message and optionally rewrites the query using an LLM.
+
+**LLM query rewrite** (optional): set `QUERY_REWRITE_ENABLED=true` in `.env`. When enabled, the last 3 conversation turns (from `CONTEXT_FILE` if set) are sent to `RECALL_MODEL` to produce a single concise search query instead of raw jieba keywords. Useful when the user's message is ambiguous or short ("那次的事" → "狼山游览 蜜雪冰城 南通").
+
+Requires `RECALL_API_KEY`. Without it, falls back to jieba silently.
+
+### Stop — `hooks/stop_archive.sh`
+
+Automatically appends a session summary to `session_archive.md` when Claude Code stops (session end or `/clear`).
+
+Install in `.claude/settings.json`:
+```json
+"hooks": {
+  "Stop": [{
+    "matcher": "",
+    "hooks": [{"type": "command",
+      "command": "bash /path/to/claude-session-rag/hooks/stop_archive.sh"}]
+  }]
+}
+```
+
+Requires `RECALL_API_KEY` and `CLAUDE_TRANSCRIPT_PATH` (set automatically by Claude Code). Reads the last 200 lines of the session transcript, calls `RECALL_MODEL` for a 3-5 sentence summary, and appends it under a dated `---` header. No-ops silently if the API key is missing.
+
 ## Limitations / TODO
 
 - **Date-range filtering**: the index stores timestamps but search doesn't filter by date yet — all history is searched equally.
 - **Config unification**: `build_index.py` uses its own path constants; the server uses `utils/config.py`. Worth consolidating.
-- **Keyword extraction**: `recall_keywords.py` uses jieba + stopwords. Noun-phrase or LLM-based extraction would improve recall.
+- ~~**Keyword extraction**: `recall_keywords.py` uses jieba + stopwords.~~ ✅ LLM-based query rewrite added (`QUERY_REWRITE_ENABLED=true`).
 - **No tests / CI** yet.
 
 ## License
