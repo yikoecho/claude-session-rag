@@ -130,9 +130,27 @@ All config via environment variables (or `.env` file). Variable names below matc
 | `SESSION_INDEX_PATH`   | `./data/session_index.jsonl`     | session_index.jsonl for `enrich_entities.py`            |
 | `JSONL_DIR`            | `~/.claude/projects/-root`       | Directory of raw `*.jsonl` sessions (build + fallback)  |
 | `SEARCH_PORT`          | `15200`                          | Port for the search server                              |
-| `OPENROUTER_API_KEY`   | —                                | Optional: enables the Haiku recall filter               |
+| `OPENROUTER_API_KEY`   | —                                | Optional: enables the Haiku recall filter (OpenRouter)  |
+| `LLM_BACKEND`          | auto (`openrouter` or `none`)    | LLM backend: `none` \| `ollama` \| `openrouter`        |
+| `OLLAMA_BASE_URL`      | `http://127.0.0.1:11434/v1`      | Ollama API base URL (only used when `LLM_BACKEND=ollama`) |
+| `LLM_BASE_URL`         | derived from backend             | Override the LLM API base URL directly                  |
+| `LLM_API_KEY`          | derived from backend             | Override the LLM API key directly                       |
 | `RECALL_MODEL`         | `anthropic/claude-haiku-4-5`     | Model for the recall filter                             |
 | `ENRICH_MODEL`         | `anthropic/claude-haiku-4-5`     | Model for entity extraction                             |
+
+## LLM Backend
+
+The recall filter and entity enrichment both use an LLM. Three modes are available:
+
+| `LLM_BACKEND` | Cost | Setup |
+|---|---|---|
+| `none` | Free | Pure vector+BM25 retrieval, no filtering. Lower precision. |
+| `ollama` | Free (local) | Run `ollama pull qwen2.5:3b` first, then start Ollama. Set `LLM_BACKEND=ollama`. |
+| `openrouter` | Paid | Set `OPENROUTER_API_KEY`. Auto-selected when the key is present. |
+
+The backend is auto-detected: if `OPENROUTER_API_KEY` is set, `openrouter` is used; otherwise `none`. Override with `LLM_BACKEND=ollama`.
+
+Legacy variables `RECALL_API_KEY` and `RECALL_BASE_URL` are still recognized for backward compatibility.
 
 > Note: `build_index.py` and the server currently read the archive from different defaults (`SESSION_ARCHIVE_PATH` vs `ARCHIVE_FILE`). Point both at the same file if you want the vector and BM25 indexes to cover identical content.
 

@@ -38,7 +38,28 @@ JSONL_INDEX_FILE = Path(
     )
 )
 
-# Recall Agent
+# ---- LLM backend (recall filter + entity enrichment) ----
+# LLM_BACKEND: "none" | "ollama" | "openrouter"
 OPENROUTER_API_KEY = os.environ.get("OPENROUTER_API_KEY", "")
-RECALL_MODEL = os.environ.get("RECALL_MODEL", "anthropic/claude-haiku-4-5")
-RECALL_ENABLED = bool(OPENROUTER_API_KEY)
+
+# 向后兼容：老变量 RECALL_API_KEY / RECALL_BASE_URL 仍可用
+_legacy_api_key = os.environ.get("RECALL_API_KEY", "")
+_legacy_base_url = os.environ.get("RECALL_BASE_URL", "")
+
+# 自动推断默认后端：有 OpenRouter key 就用它，否则关闭
+_default_backend = "openrouter" if (OPENROUTER_API_KEY or _legacy_api_key) else "none"
+LLM_BACKEND = os.environ.get("LLM_BACKEND", _default_backend).lower()
+
+# 各后端的 endpoint / key / 默认模型
+if LLM_BACKEND == "ollama":
+    LLM_BASE_URL = os.environ.get("OLLAMA_BASE_URL", "http://127.0.0.1:11434/v1")
+    LLM_API_KEY = "ollama"
+    RECALL_MODEL = os.environ.get("RECALL_MODEL", "qwen2.5:3b")
+    ENRICH_MODEL = os.environ.get("ENRICH_MODEL", "qwen2.5:3b")
+else:  # openrouter（none 时这些值用不到）
+    LLM_BASE_URL = _legacy_base_url or "https://openrouter.ai/api/v1"
+    LLM_API_KEY = OPENROUTER_API_KEY or _legacy_api_key
+    RECALL_MODEL = os.environ.get("RECALL_MODEL", "anthropic/claude-haiku-4-5")
+    ENRICH_MODEL = os.environ.get("ENRICH_MODEL", "anthropic/claude-haiku-4-5")
+
+RECALL_ENABLED = LLM_BACKEND != "none"

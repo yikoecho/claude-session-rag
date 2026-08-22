@@ -1,19 +1,11 @@
 #!/usr/bin/env python3
 """
-enrich_entities.py — Extract named entities from session_index.jsonl entries.
-
-Reads session_index.jsonl, calls an LLM (via OpenRouter) to extract entities
-from each entry's key+text fields, and writes back an "entities" field.
-Supports incremental updates (skips entries that already have entities).
-
-Usage:
-  python3 enrich_entities.py              # process all missing entries
-  python3 enrich_entities.py --limit 50   # process first 50 missing entries
-  python3 enrich_entities.py --new-only   # process only last 2 days (for post-archive runs)
-
-Environment variables:
-  OPENROUTER_API_KEY    Required
-  SESSION_INDEX_PATH    Path to session_index.jsonl (default: ./data/session_index.jsonl)
+实体抽取增强：从 session_index.jsonl 的 key+text 中提取命名实体，补进 entities 字段。
+支持断点续跑（已有 entities 字段的条目跳过）。
+用法：
+  python3 enrich_entities.py              # 处理全部缺失的条目
+  python3 enrich_entities.py --limit 50   # 只处理前50条缺失的
+  python3 enrich_entities.py --new-only   # 只处理最近N天新增的（归档时用）
 """
 import sys
 import json
@@ -25,29 +17,26 @@ from datetime import datetime, timedelta
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from openai import OpenAI
 
-# Load .env if present
-_env = Path(".env")
-if not _env.exists():
-    _env = Path(__file__).parent / ".env"
-if _env.exists():
-    for _line in _env.read_text().splitlines():
-        _line = _line.strip()
-        if _line and not _line.startswith("#") and "=" in _line:
-            k, v = _line.split("=", 1)
-            os.environ.setdefault(k.strip(), v.strip())
+# 把 utils/ 加到 path，确保能 import utils.config
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from utils.config import LLM_BASE_URL, LLM_API_KEY, ENRICH_MODEL, RECALL_ENABLED
 
-OPENROUTER_KEY = os.environ.get("OPENROUTER_API_KEY", "")
-SESSION_INDEX_PATH = os.environ.get("SESSION_INDEX_PATH", "./data/session_index.jsonl")
-MODEL = os.environ.get("ENRICH_MODEL", "anthropic/claude-haiku-4-5")
-
-client = OpenAI(
-    base_url="https://openrouter.ai/api/v1",
-    api_key=OPENROUTER_KEY,
+INDEX_FILE = os.environ.get(
+    "SESSION_INDEX_PATH",
+    os.path.expanduser("~/.claude/session_index.jsonl"),
 )
 
-PROMPT_TEMPLATE = """Extract specific named entities from the text below. Return a flat JSON string array — no objects, no generic words, no explanation. Return only the array itself, e.g.: ["monitor.py", "save_data()", "deploy_flag"]
+if not RECALL_ENABLED:
+    print("[enrich_entities] LLM backend 未启用（LLM_BACKEND=none），跳过实体抽取。")
+    print("设置 LLM_BACKEND=ollama 或配置 OPENROUTER_API_KEY 后重试。")
+    sys.exit(0)
 
-Text:
+client = OpenAI(base_url=LLM_BASE_URL, api_key=LLM_API_KEY)
+MODEL = ENRICH_MODEL
+
+PROMPT_TEMPLATE = """从以下文本中提取具体的命名实体，合并成一个扁平JSON字符串数组返回，不要对象，不要通用词，不要解释。只返回数组本身，例如：["solitude_monitor", "save_data()", "flag"]
+
+文本：
 {key}
 {text}"""
 
@@ -62,13 +51,13 @@ def extract_entities(key: str, text: str) -> list[str]:
             temperature=0,
         )
         output = resp.choices[0].message.content.strip()
-        # Try to match a top-level array first
+        # 优先匹配顶层数组
         m = re.search(r'\[([^\[\]]*)\]', output, re.DOTALL)
         if m:
             entities = json.loads(m.group())
             if isinstance(entities, list):
                 return [e for e in entities if isinstance(e, str) and e.strip()]
-        # Fallback: if model returned an object, collect all string values
+        # fallback：如果返回对象，收集所有字符串值
         m2 = re.search(r'\{.*\}', output, re.DOTALL)
         if m2:
             obj = json.loads(m2.group())
@@ -104,7 +93,7 @@ def enrich_entries(entries: list[dict], limit: int | None = None, new_only_days:
     if total == 0:
         return entries, 0
 
-    print(f"Entries to process: {total}, concurrency: 10")
+    print(f"待处理条目: {total}，并发数: 10")
     updated = 0
     done_count = 0
 
@@ -137,31 +126,25 @@ def atomic_write(path: str, entries: list[dict]):
 
 
 def main():
-    if not OPENROUTER_KEY:
-        print("Error: OPENROUTER_API_KEY is not set")
-        sys.exit(1)
-
     parser = argparse.ArgumentParser()
     parser.add_argument("--limit", type=int, default=None)
-    parser.add_argument("--new-only", action="store_true", help="Only process entries from the last 2 days (for post-archive runs)")
-    parser.add_argument("--file", default=SESSION_INDEX_PATH, help="Path to session_index.jsonl")
+    parser.add_argument("--new-only", action="store_true", help="只处理最近2天的新条目（归档时用）")
     args = parser.parse_args()
 
-    index_file = args.file
-    with open(index_file, encoding="utf-8") as f:
+    with open(INDEX_FILE, encoding="utf-8") as f:
         entries = [json.loads(line) for line in f if line.strip()]
 
     already = sum(1 for e in entries if "entities" in e)
-    print(f"Total entries: {len(entries)}, with entities: {already}, missing: {len(entries) - already}")
+    print(f"总条目: {len(entries)}, 已有entities: {already}, 缺失: {len(entries) - already}")
 
     new_only_days = 2 if args.new_only else None
     entries, updated = enrich_entries(entries, limit=args.limit, new_only_days=new_only_days)
 
     if updated > 0:
-        atomic_write(index_file, entries)
-        print(f"\nDone. Updated {updated} entries, written to {index_file}")
+        atomic_write(INDEX_FILE, entries)
+        print(f"\n完成，更新 {updated} 条，已写回 {INDEX_FILE}")
     else:
-        print("Nothing to update.")
+        print("无需更新。")
 
 
 if __name__ == "__main__":

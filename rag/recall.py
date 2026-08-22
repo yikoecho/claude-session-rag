@@ -6,7 +6,7 @@ import json
 
 import httpx
 
-from utils.config import OPENROUTER_API_KEY, RECALL_MODEL, RECALL_ENABLED
+from utils.config import LLM_BASE_URL, LLM_API_KEY, RECALL_MODEL, RECALL_ENABLED
 
 _http_client = httpx.Client(timeout=10.0)
 
@@ -44,9 +44,9 @@ def recall_agent(prompt: str, candidates: list[str]) -> list[str]:
 
     try:
         resp = _http_client.post(
-            "https://openrouter.ai/api/v1/chat/completions",
+            f"{LLM_BASE_URL.rstrip('/')}/chat/completions",
             headers={
-                "Authorization": f"Bearer {OPENROUTER_API_KEY}",
+                "Authorization": f"Bearer {LLM_API_KEY}",
                 "Content-Type": "application/json",
             },
             json={
