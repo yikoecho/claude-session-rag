@@ -1,149 +1,154 @@
 # claude-session-rag
 
-Semantic memory recall for Claude Code sessions. Indexes your conversation history and injects relevant past context into each new prompt via a `UserPromptSubmit` hook.
+跨 session 语义记忆检索框架，专为 Claude Code 伴侣系统设计。把历史对话建向量索引，每次新消息触发时自动召回相关记忆注入上下文。
 
-This is not a general-purpose RAG framework. It's built specifically for the Claude Code CLI — where conversations are long-running sessions, the "documents" are conversation summaries, and the goal is helping Claude remember things from weeks ago without blowing up the context window.
-
-## Architecture
+## 架构
 
 ```
-session_archive.md (conversation summaries)
-        ↓ build_index.py
-   LanceDB (bge-m3 vectors + FTS)
-        ↓ search_server.py (HTTP on :15200)
-   UserPromptSubmit hook (memory_recall.sh)
-        ↓
-   additionalContext injected into Claude Code prompt
+用户消息
+  │
+  ├── 关键词提取（jieba）
+  │
+  ├── BM25 搜索（session_archive.md）
+  ├── 向量搜索（LanceDB cosine）
+  └── SQL LIKE 精确匹配（专有名词兜底）
+          │
+          RRF 融合排序
+          │
+      注入 Claude 上下文
 ```
 
-Optional: `enrich_entities.py` extracts named entities from a `session_index.jsonl` file to improve keyword recall.
+数据源支持两种：
+- `session_archive.md`：结构化对话摘要，主数据源
+- `.jsonl` 原始对话文件：Claude Code 项目目录下的完整对话记录
 
-Optional: Haiku filter via OpenRouter — the `/recall` endpoint re-ranks and prunes candidates before injection.
-
-## Requirements
-
-- Python 3.10+
-- [lancedb](https://lancedb.github.io/lancedb/)
-- [ripgrep](https://github.com/BurntSushi/ripgrep) (`rg`) in PATH for the hook
-- An embedding API compatible with the OpenAI client (tested with [SiliconFlow](https://siliconflow.cn) using `BAAI/bge-m3`)
-- OpenRouter API key (optional, for Haiku filter in entity enrichment)
-
-```
-pip install lancedb openai pyarrow httpx
-```
-
-## Quick Start
+## 安装
 
 ```bash
-git clone https://github.com/yikoecho/claude-session-rag.git
-cd claude-session-rag
-cp config.example.env .env
-# edit .env: set EMBEDDING_API_KEY at minimum
+pip install lancedb openai pyarrow tiktoken jieba rank-bm25
 ```
 
-Prepare your session archive (see `data/session_archive.example.md` for format):
+## 配置
+
+在项目根目录或 `/root/.env` 里设置：
+
 ```bash
-cp data/session_archive.example.md data/session_archive.md
-# or copy your real session_archive.md from Claude Code
+EMBEDDING_API_KEY=sk-...          # embedding API key（支持 SiliconFlow / OpenAI）
+EMBEDDING_BASE_URL=https://api.siliconflow.cn/v1
+EMBEDDING_MODEL=BAAI/bge-m3
+LANCE_DB_PATH=./memory_db          # LanceDB 存储路径（可选）
+JSONL_DIR=/path/to/.claude/projects/-root  # JSONL 数据源目录（可选）
 ```
 
-Build the index:
+推荐用 [SiliconFlow](https://siliconflow.cn) 免费 API，`BAAI/bge-m3` 模型，1024 维。
+
+## 建索引
+
+### 默认（session_archive + JSONL 全量）
+
 ```bash
 python build_index.py
-# or: python build_index.py /path/to/session_archive.md
 ```
 
-Start the search server:
+### 指定路径
+
+```bash
+python build_index.py /path/to/session_archive.md /path/to/jsonl_dir
+```
+
+- 第一个参数：`session_archive.md` 路径
+- 第二个参数：包含 `.jsonl` 文件的目录（Claude Code 项目目录）
+
+### 分块策略
+
+使用 **tiktoken** 按 token 切块：
+- 块大小：400 token
+- 重叠：50 token（相邻块之间）
+- 编码：`cl100k_base`
+
+`session_archive.md` 先按 `---` 分段，每段再用 tiktoken 切块。`.jsonl` 提取 `role=assistant` 的纯文本（跳过 `tool_use` / `thinking` 块），同样走 tiktoken。
+
+增量更新：已处理的 chunk 自动跳过，只 embed 新内容。
+
+### JSONL 数据源
+
+Claude Code 的对话历史存在 `.claude/projects/<project-id>/*.jsonl`，`build_index.py` 会：
+
+1. 扫描目录下所有 `.jsonl` 文件
+2. 提取 `type=assistant`、`message.role=assistant` 的条目
+3. 跳过 `tool_use`、`tool_result`、`thinking` 类型的 content block
+4. 对提取出的纯文本做 tiktoken 切块，写入同一个 LanceDB 表
+
+```bash
+# 指定 JSONL 目录
+JSONL_DIR=/root/.claude/projects/-root python build_index.py
+```
+
+## 检索
+
+### 启动检索服务
+
 ```bash
 python search_server.py
+# 默认监听 127.0.0.1:15200
 ```
 
-Test it:
+### 接口
+
 ```bash
-curl "http://127.0.0.1:15200/search?q=your+query&top_k=3"
+# 混合检索（推荐）
+curl -G --data-urlencode "q=你的查询" --data-urlencode "top_k=5" \
+  http://127.0.0.1:15200/hybrid
+
+# 向量检索
+curl -G --data-urlencode "q=你的查询" http://127.0.0.1:15200/vector
 ```
 
-Configure the Claude Code hook — add to `.claude/settings.json`:
-```json
-{
-  "hooks": {
-    "UserPromptSubmit": [
-      {
-        "matcher": "",
-        "hooks": [
-          {
-            "type": "command",
-            "command": "bash /path/to/claude-session-rag/hooks/memory_recall.sh"
-          }
-        ]
-      }
-    ]
-  }
-}
+**注意**：中文查询必须 URL encode，直接拼 URL 会被截断。
+
+### 混合检索策略
+
+三层融合，解决不同类型查询的召回问题：
+
+1. **BM25**：关键词频率匹配，适合精确词汇
+2. **向量搜索**：语义相似度，适合模糊表达
+3. **SQL LIKE 精确匹配**：`text LIKE '%关键词%'`，专为中文专有名词兜底
+   - FTS（tantivy）对中文使用 ASCII 分词，中文词无法命中
+   - 向量相似度对专有名词（人名、地名、品牌）往往低于 threshold
+   - LIKE 命中的结果强制 score=0.9，排在最前
+
+结果用 RRF（Reciprocal Rank Fusion）排序后取 top_k。
+
+## 接入 hook
+
+参考 `hooks/` 目录：
+
+- `recall_keywords.py`：从用户消息提取搜索关键词
+- `notice_filter.py`：过滤召回结果，判断是否需要注入
+- `breath_search.example.py`：与 OB breath 工具并行搜索的示例
+
+## 文件结构
+
+```
+.
+├── build_index.py        # 建索引（session_archive + JSONL）
+├── search_server.py      # HTTP 检索服务入口
+├── server.py             # HTTP handler
+├── search.py             # 命令行测试检索
+├── rag/
+│   └── hybrid.py         # 混合检索逻辑（BM25 + 向量 + LIKE）
+├── index/
+│   ├── vector.py         # LanceDB 连接 + 向量搜索
+│   └── bm25.py           # BM25 搜索
+├── hooks/                # Claude Code hook 集成示例
+└── utils/
+    └── config.py         # 配置读取
 ```
 
-## How It Works
+## 费用参考
 
-**`build_index.py`** — reads `session_archive.md`, splits it into chunks at `---` separators, embeds each chunk with bge-m3, and stores vectors in LanceDB. Incremental: already-indexed chunks are skipped on re-runs.
+SiliconFlow `BAAI/bge-m3`：免费（截至 2026-08）
 
-**`search_server.py`** — serves two endpoints:
-- `GET /search` — hybrid search (vector + FTS), returns ranked text snippets
-- `POST /recall` — optional Haiku filter that prunes candidates to only genuinely relevant ones
+全量建索引（5000+ chunk）约 1-2 分钟，之后增量更新只处理新增内容。
 
-**`hooks/memory_recall.sh`** — the Claude Code hook. On each user message it: extracts keywords, searches the server in parallel, optionally filters with Haiku, and returns results as `additionalContext`.
-
-**`enrich_entities.py`** — optional post-processing step. Reads a `session_index.jsonl` (one JSON object per line with `key`, `text`, `date` fields), extracts named entities via LLM, and writes them back as an `entities` field. This improves grep-based recall for technical terms.
-
-## Configuration
-
-All config via environment variables (or `.env` file):
-
-| Variable | Default | Description |
-|---|---|---|
-| `EMBEDDING_API_KEY` | — | Required. Embedding API key |
-| `EMBEDDING_BASE_URL` | `https://api.siliconflow.cn/v1` | Embedding API base URL |
-| `EMBEDDING_MODEL` | `BAAI/bge-m3` | Embedding model name |
-| `LANCEDB_PATH` | `./data/lancedb` | LanceDB storage path |
-| `SESSION_ARCHIVE_PATH` | `./data/session_archive.md` | Session archive file |
-| `SESSION_INDEX_PATH` | `./data/session_index.jsonl` | Session index (for enrich_entities) |
-| `SEARCH_SERVER_PORT` | `15200` | Port for search_server.py |
-| `JSONL_DIR` | — | Optional: path to raw `.jsonl` conversation files for grep fallback |
-| `OPENROUTER_API_KEY` | — | Optional: enables Haiku recall filter |
-| `RECALL_MODEL` | `anthropic/claude-haiku-4-5` | Model for recall filter |
-| `ENRICH_MODEL` | `anthropic/claude-haiku-4-5` | Model for entity extraction |
-
-## Session Archive Format
-
-The archive is a plain Markdown file split by `---` separators. Each section should have a `### YYYY-MM-DD` timestamp line and optionally a `## Session: ...` header:
-
-```markdown
-## Session: 2026-06-15 to 2026-06-17
-
-### 2026-06-15 23:45 CST
-
-Summary of what happened in this conversation...
-
----
-
-### 2026-06-16 14:30 CST
-
-Another day's summary...
-
----
-```
-
-See `data/session_archive.example.md` for a complete example.
-
-## Privacy Warning
-
-> **Your session archive may contain sensitive information** — API keys, personal details, internal URLs, or private conversations — that ends up embedded in the vector index and injected back into future prompts.
->
-> Before indexing, review your archive and redact or exclude any secrets. Consider using a `.env`-only approach for credentials and never logging them to session summaries.
-
-## Limitations / TODO
-
-- **Chunk splitting**: currently splits on `---` only. Long sections (>2000 chars) are truncated rather than split semantically. Overlapping sliding-window chunking would improve recall on long summaries.
-- **Date metadata filtering**: the index stores timestamps but `/search` doesn't support filtering by date range yet. All history is searched equally.
-- **Haiku filter is optional but improves precision**: without it, the hook injects up to 8 candidates directly. With it, irrelevant-but-similar memories are pruned. Set `OPENROUTER_API_KEY` to enable.
-- **`recall_keywords.py` is a stub**: the included version uses simple stopword filtering. Replace it with something smarter (e.g., extracting noun phrases, using spacy, or calling an LLM) for better keyword search results.
-- **`session_index.jsonl` format**: `enrich_entities.py` expects entries with `key`, `text`, and `date` fields. This matches the format produced by Claude Code's archive scripts but you may need to adapt it for other sources.
+每次检索：1 次 embedding API 调用（约 100ms）+ 本地 LanceDB 查询。
