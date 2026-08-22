@@ -27,7 +27,7 @@ threading.Thread(target=build_bm25_index, daemon=True).start()
 if RECALL_ENABLED:
     print(f"[search_server] Recall Agent 已启用，模型: {RECALL_MODEL}")
 else:
-    print(f"[search_server] ⚠ Recall Agent 未启用（缺少 OPENROUTER_API_KEY）")
+    print(f"[search_server] ⚠️ Recall Agent 未启用（设 LLM_BACKEND=ollama 或配 OPENROUTER_API_KEY 启用）")
 
 
 class Handler(BaseHTTPRequestHandler):
