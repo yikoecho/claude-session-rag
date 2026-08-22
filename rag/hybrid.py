@@ -12,7 +12,7 @@ from utils.config import EMBEDDING_MODEL, JSONL_DIR
 
 
 def hybrid_search(query: str, top_k: int = 5) -> list[dict]:
-    """RRF 混合检索：向量 + BM25，返回 [{text, score}, ...] 列表。"""
+    """RRF 混合检索：向量 + BM25 + 精确关键词，返回 [{text, score}, ...] 列表。"""
     vec_results = vector_search_raw(query, top_k=20)
     bm25_results = bm25_search_raw(query, top_k=20)
 
@@ -31,7 +31,26 @@ def hybrid_search(query: str, top_k: int = 5) -> list[dict]:
     add(bm25_results)
 
     ranked = sorted(rrf_scores.items(), key=lambda x: x[1], reverse=True)[:top_k]
-    return [{"text": key_of[dk], "score": round(score, 6)} for dk, score in ranked]
+    results = [{"text": key_of[dk], "score": round(score, 6)} for dk, score in ranked]
+
+    # 精确关键词匹配（补偿 BM25/FTS 对中文无效的问题），命中的强制插入最前面
+    try:
+        table = get_table()
+        if table is not None:
+            kw_rows = table.search().where(f"text LIKE '%{query}%'").limit(top_k).to_list()
+            kw_items = []
+            existing_texts = {r["text"][:80] for r in results}
+            for row in kw_rows:
+                date = str(row["timestamp_start"])[:10]
+                snippet = row["text"][:200].replace("\n", " ")
+                text = f"{date}: {snippet}"
+                if text[:80] not in existing_texts:
+                    kw_items.append({"text": text, "score": 0.9})
+            results = kw_items + results
+    except Exception:
+        pass
+
+    return results[:top_k]
 
 
 def _extract_content(obj: dict) -> str:
@@ -67,7 +86,7 @@ def _jsonl_fallback(query: str, context_window: int = 3) -> str:
     seen_texts = set()
     hits = []
     for line in grep_result.stdout.strip().splitlines():
-        parts = line.split(":", 2)
+        parts = line.rsplit(":", 2)
         if len(parts) < 3:
             continue
         filepath, lineno_str, raw_json = parts[0], parts[1], parts[2].strip()
@@ -161,12 +180,25 @@ def search(query: str, top_k: int = 3, threshold: float = 0.45) -> str:
         fts_results = None
 
     merged = {}
+
+    # 精确关键词匹配（绕过 FTS 的中文分词问题）
+    try:
+        kw_rows = table.search().where(f"text LIKE '%{query}%'").limit(top_k).to_list()
+        for row in kw_rows:
+            cid = row["chunk_id"]
+            merged[cid] = {"row": row, "score": 0.8}
+    except Exception:
+        pass
+
     for _, row in vec_results.iterrows():
         score = 1 - row.get("_distance", 1)
         if score < threshold:
             continue
         cid = row["chunk_id"]
-        merged[cid] = {"row": row, "score": score}
+        if cid not in merged:
+            merged[cid] = {"row": row, "score": score}
+        else:
+            merged[cid]["score"] = max(merged[cid]["score"], score)
 
     if fts_results is not None and not fts_results.empty:
         for _, row in fts_results.iterrows():

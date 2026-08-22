@@ -23,7 +23,7 @@ try:
 
     def _build_fts():
         try:
-            _table.create_index(config=FTS(), replace=True)
+            _table.create_index("text", config=FTS(), replace=True)
             print("[search_server] FTS 索引已建立")
         except Exception as fe:
             print(f"[search_server] ⚠ FTS 索引建立失败: {fe}")
