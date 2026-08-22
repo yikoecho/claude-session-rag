@@ -143,15 +143,15 @@ All config via environment variables (or `.env` file). Variable names below matc
 
 The recall filter and entity enrichment both use an LLM. Five modes are available:
 
-| 模式 | 费用 | 说明 |
-|------|------|------|
-| `none` | 免费 | 零配置，无 LLM，纯向量+BM25 |
-| `siliconflow` | 免费 | 远程 API，需注册 siliconflow.cn，可复用 `EMBEDDING_API_KEY` |
-| `ollama` | 免费 | 本地推理，需先 `ollama pull Qwen/Qwen3-8B` |
-| `api` | 付费 | 任意 OpenAI 兼容接口，填 `LLM_BASE_URL` + `LLM_API_KEY` + `RECALL_MODEL` |
-| `openrouter` | 付费 | 同 `api`，旧名称，向后兼容 |
+| Mode | Cost | Notes |
+|------|------|-------|
+| `none` | Free | Zero config, pure vector+BM25, no LLM |
+| `siliconflow` | Free | Remote API via siliconflow.cn; reuse your `EMBEDDING_API_KEY` |
+| `ollama` | Free | Local inference; run `ollama pull Qwen/Qwen3-8B` first |
+| `api` | Paid | Any OpenAI-compatible endpoint; set `LLM_BASE_URL` + `LLM_API_KEY` + `RECALL_MODEL` |
+| `openrouter` | Paid | Alias for `api`, kept for backward compatibility |
 
-我们自己使用 `RECALL_MODEL=anthropic/claude-haiku-4-5`（通过 OpenRouter），其他可选：`deepseek/deepseek-chat`、`google/gemini-flash-1.5`、`openai/gpt-4o-mini`。SiliconFlow 免费可用：`Qwen/Qwen3-8B`、`Qwen/Qwen2.5-7B-Instruct`、`Pro/deepseek-ai/DeepSeek-R1`。
+We use `RECALL_MODEL=anthropic/claude-haiku-4-5` via OpenRouter. Other options: `deepseek/deepseek-chat`, `google/gemini-flash-1.5`, `openai/gpt-4o-mini`. Free models on SiliconFlow: `Qwen/Qwen3-8B`, `Qwen/Qwen2.5-7B-Instruct`, `Pro/deepseek-ai/DeepSeek-R1`.
 
 The backend is auto-detected: if `OPENROUTER_API_KEY` is set, `openrouter` is used; otherwise `none`. Override with `LLM_BACKEND=siliconflow` or `LLM_BACKEND=ollama`.
 
@@ -187,7 +187,7 @@ See `data/session_archive.example.md` for a complete example.
 
 Extracts search keywords from the user's message and optionally rewrites the query using an LLM.
 
-**LLM query rewrite** (optional): set `QUERY_REWRITE_ENABLED=true` in `.env`. When enabled, the last 3 conversation turns (from `CONTEXT_FILE` if set) are sent to `RECALL_MODEL` to produce a single concise search query instead of raw jieba keywords. Useful when the user's message is ambiguous or short ("那次的事" → "狼山游览 蜜雪冰城 南通").
+**LLM query rewrite** (optional): set `QUERY_REWRITE_ENABLED=true` in `.env`. When enabled, the last 3 conversation turns (from `CONTEXT_FILE` if set) are sent to `RECALL_MODEL` to produce a single concise search query instead of raw jieba keywords. Useful when the user's message is ambiguous or short ("那次的事" → "蜜雪冰城 夏日聚餐").
 
 Requires `RECALL_API_KEY`. Without it, falls back to jieba silently.
 
