@@ -1,6 +1,6 @@
 # claude-session-rag
 
-跨 session 语义记忆检索框架，专为 Claude Code 伴侣系统设计。把历史对话建向量索引，每次新消息触发时自动召回相关记忆注入上下文。
+跨 session 语义记忆检索框架，适用于需要跨 session 长期记忆的 Claude Code 项目。把历史对话建向量索引，每次新消息触发时自动召回相关记忆注入上下文。
 
 ## 架构
 
