@@ -1,0 +1,35 @@
+{
+  "version": "2",
+  "note": "示例 eval 查询集（替换为你的真实数据）。两组分开报：recall 组看命中率，no_record 组看 none 率。",
+  "groups": {
+    "recall": {
+      "metric": "命中率 = verdict in (sufficient, partial) / 总数",
+      "queries": [
+        {
+          "id": "r01",
+          "query": "修某个 bug 的记录",
+          "difficulty": "easy",
+          "note": "替换为你的真实查询"
+        },
+        {
+          "id": "r02",
+          "query": "某次技术方案讨论",
+          "difficulty": "medium",
+          "note": "替换为你的真实查询"
+        }
+      ]
+    },
+    "no_record": {
+      "metric": "none 率 = verdict=none / 总数",
+      "note": "期望输出 verdict=none。若召回了内容说明出现编造/错误关联",
+      "queries": [
+        {
+          "id": "n01",
+          "query": "从未发生过的事件",
+          "ground_truth": "none",
+          "note": "替换为确定档案里没有的内容"
+        }
+      ]
+    }
+  }
+}

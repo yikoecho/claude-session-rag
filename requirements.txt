@@ -1,0 +1,7 @@
+httpx
+jieba
+lancedb
+openai
+pyarrow
+rank_bm25
+tiktoken

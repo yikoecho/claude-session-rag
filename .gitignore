@@ -1,0 +1,28 @@
+# 私有数据 — 永不入库
+eval_baseline/*.json
+eval_baseline/*.jsonl
+!eval_baseline/*.example.json
+eval_data/
+*baseline*.json
+*_queries.json
+*.log
+.env
+
+# 向量/BM25 索引（可重建）
+lancedb/
+data/lancedb/
+memory_db/
+
+# 用户数据
+data/session_archive.md
+data/session_index.jsonl
+data/*.jsonl
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+
+# 备份文件
+*.bak
