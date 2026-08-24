@@ -1,74 +1,72 @@
 # claude-session-rag
 
-Semantic memory recall for Claude Code sessions. Indexes your conversation history and injects relevant past context into each new prompt via a `UserPromptSubmit` hook.
+Claude Code 的语义记忆召回系统。将你的对话历史建立索引，在每条新消息发出时，通过 `UserPromptSubmit` hook 把相关的历史上下文注入到提示词里。
 
-This is not a general-purpose RAG framework. It's built specifically for the Claude Code CLI — where conversations are long-running sessions, the primary documents are raw jsonl conversation turns written automatically by Claude Code, with curated session summaries as an optional enhancement layer, and the goal is helping Claude remember things from weeks ago without blowing up the context window.
+这不是一个通用 RAG 框架。它专门为 Claude Code CLI 设计：对话是长期运行的 session，主要文档是 Claude Code 自动写入的 `.jsonl` 对话记录，辅以手写的 session 摘要，目标是让 Claude 在不撑爆上下文窗口的前提下，记住几周前发生的事。
 
-> **Security note:** the search server has **no authentication** and binds to `127.0.0.1` only. Never expose port `15200`. Never commit your `.env`. Also keep out of version control: `session_archive.md`, `*.jsonl` files, `memory_db/`, and `eval_baseline/` — all of these contain real conversation content. `eval_baseline/` is a new directory type that's easy to overlook; it stores query results used for regression comparison and will contain excerpts of your actual conversations. The `.gitignore` in this repo excludes all of the above.
+> **安全提示：** 搜索服务器没有身份验证，只绑定 `127.0.0.1`，不要暴露 15200 端口。`.env`、`session_archive.md`、`*.jsonl`、`memory_db/`、`eval_baseline/` 这些都不能进版本库——它们包含真实的对话内容。`.gitignore` 已经覆盖了以上所有路径，但 `eval_baseline/` 特别容易被遗漏，因为它是后加的目录。
 
-## Architecture
+## 架构
 
 ```
-*.jsonl (required)                session_archive.md (optional)
-   │  Raw Claude Code sessions        Curated session summaries
-   │  generated automatically         written by a Stop hook
-   └──────────────┬───────────────────────────┘
+*.jsonl（必须）                  session_archive.md（可选）
+   │  Claude Code 自动写入           人工整理的 session 摘要
+   └──────────────┬──────────────────────────┘
                   ↓ build_index.py
-     LanceDB (bge-m3 vectors)  +  in-memory BM25
-                  ↓ search_server.py (HTTP on 127.0.0.1:15200)
-     UserPromptSubmit hook (memory_recall.sh)
+     LanceDB（bge-m3 向量） + 内存 BM25
+                  ↓ server.py（HTTP 在 127.0.0.1:15200）
+     UserPromptSubmit hook（memory_recall.sh）
                   ↓
-     additionalContext injected into the Claude Code prompt
+     additionalContext 注入到 Claude Code 提示词
 ```
 
-**Primary data source:** `*.jsonl` files from `JSONL_DIR`. Claude Code writes these automatically — no manual steps needed. Point `JSONL_DIR` at your `~/.claude/projects/` subdirectory and you're done.
+**主数据源：** `JSONL_DIR` 下的 `*.jsonl` 文件，由 Claude Code 自动生成，无需手动维护。把 `JSONL_DIR` 指向 `~/.claude/projects/` 下对应的子目录即可。
 
-**Secondary (optional):** `session_archive.md` adds a curated human-readable summary layer to the BM25 index. Useful for long-running projects with hundreds of sessions. See the Stop hook section for auto-generation.
+**辅助层（可选）：** `session_archive.md` 为 BM25 索引增加一层人工整理的摘要，适合有几百个 session 的长期项目。可以用 Stop hook 自动生成（见 `hooks/stop_archive.sh`）。
 
-**Entity extraction:** `enrich_entities.py` reads `session_index.jsonl` (one entry per line with `key`, `text`, `date` fields), calls an LLM to extract named entities, and writes them back as an `entities` field. This powers the BM25 entity path and is what makes keyword recall work for proper nouns, technical terms, and names. With ~780 entity entries in the author's corpus, it's not optional post-processing — it's the main BM25 signal.
+**实体提取：** `enrich_entities.py` 读取 `session_index.jsonl`（每行一个条目，含 `key`、`text`、`date` 字段），调用 LLM 提取命名实体，写回 `entities` 字段。这是 BM25 实体路径的基础——没有它，人名、技术术语、项目名等低频词的关键词召回基本不可用。
 
-## Requirements
+## 环境要求
 
 - Python 3.10+
-- [ripgrep](https://github.com/BurntSushi/ripgrep) (`rg`) in PATH for the hook
-- An embedding API compatible with the OpenAI client (tested with [SiliconFlow](https://siliconflow.cn) using `BAAI/bge-m3`)
-- OpenRouter API key (optional, for the Haiku recall filter and entity enrichment)
+- [ripgrep](https://github.com/BurntSushi/ripgrep)（`rg`）在 PATH 中（hook 需要）
+- 兼容 OpenAI 客户端的 Embedding API（测试使用 [SiliconFlow](https://siliconflow.cn) + `BAAI/bge-m3`）
+- OpenRouter API key（可选，用于 Haiku 召回过滤和实体提取）
 
-```
+```bash
 pip install -r requirements.txt
 ```
 
-## Quick Start
+## 快速开始
 
 ```bash
 git clone https://github.com/yikoecho/claude-session-rag.git
 cd claude-session-rag
 cp config.example.env .env
-# edit .env — set EMBEDDING_API_KEY and JSONL_DIR at minimum
+# 编辑 .env，至少设置 EMBEDDING_API_KEY 和 JSONL_DIR
 ```
 
-Build the index (point it at your Claude Code jsonl directory):
+建索引：
 
 ```bash
 python build_index.py
-# or: python build_index.py /path/to/session_archive.md /path/to/jsonl_dir
-# session_archive.md is optional — omit or pass an empty path to skip it
-# Note: if ARCHIVE_FILE is set in .env, it takes precedence over the positional argument
+# 或：python build_index.py /path/to/session_archive.md /path/to/jsonl_dir
+# session_archive.md 是可选的，不传或传空路径跳过
 ```
 
-Start the search server:
+启动搜索服务器：
 
 ```bash
-python search_server.py
+python server.py
 ```
 
-Test it:
+测试：
 
 ```bash
-curl "http://127.0.0.1:15200/hybrid?q=your+query&top_k=3"
+curl "http://127.0.0.1:15200/hybrid?q=你的查询&top_k=3"
 ```
 
-Configure the Claude Code hook — add to `.claude/settings.json`:
+配置 Claude Code hook，在 `.claude/settings.json` 里加：
 
 ```json
 {
@@ -88,130 +86,137 @@ Configure the Claude Code hook — add to `.claude/settings.json`:
 }
 ```
 
-## Endpoints
+## 接口
 
-| Method | Path            | Description                                                        |
-| ------ | --------------- | ----------------------------------------------------------------- |
-| GET    | `/hybrid`       | RRF hybrid search (vector + BM25 + exact keyword). Returns JSON.   |
-| GET    | `/bm25`         | BM25-only search. Returns plain text.                             |
-| GET    | `/reload_bm25`  | Rebuilds the in-memory BM25 index (e.g. after archive updates).   |
-| POST   | `/recall`       | Optional Haiku filter — classifies candidates and injects them with a three-state verdict (see below). |
-| GET    | `/search`       | **Deprecated** — returns HTTP 410. Use `/hybrid`.                 |
+| 方法 | 路径 | 说明 |
+|------|------|------|
+| GET | `/hybrid` | RRF 混合搜索（向量 + BM25 + 关键词精确匹配），返回 JSON |
+| GET | `/bm25` | 纯 BM25 搜索，返回纯文本 |
+| GET | `/reload_bm25` | 重建内存 BM25 索引（archive 更新后调用） |
+| POST | `/recall` | Haiku 过滤器——对候选结果做三档判定（见下文） |
 
-### `/recall` verdict system
+### `/recall` 三档判定
 
-`/recall` is the most distinctive part of the pipeline. It sends hybrid-search candidates to a small LLM (default: `claude-haiku-4-5`) and returns one of four verdicts:
+`/recall` 是这套管道最关键的部分。它把混合搜索的候选结果送给小模型（默认 `claude-haiku-4-5`），返回以下四种 verdict：
 
-- **`sufficient`** — the retrieved passages clearly answer the query; injected directly into `additionalContext`.
-- **`partial`** — something was found but confidence is low; injected with the prefix `以下内容与问题相关但可能未直接回答，仅供参考：` so Claude knows to treat it as suggestive, not definitive.
-- **`none`** — nothing relevant was found; injects `[archive_status] 档案中未找到与该问题相关的记录。` so Claude knows the silence is intentional, not a pipeline failure.
-- **`unfiltered`** — recall was disabled (`RECALL_ENABLED=False`) or the LLM call failed; candidates are injected as-is with the prefix `以下内容未经过滤，可能包含不相关的记录：`. This is distinct from `partial` so that downstream consumers can tell the difference between "LLM said low confidence" and "LLM was never asked".
+- **`sufficient`**：候选片段能直接回答问题，注入到 `additionalContext`。
+- **`partial`**：找到了相关内容但置信度低，加前缀 `以下内容与问题相关但可能未直接回答，仅供参考：` 注入，让 Claude 知道这不是确定的答案。
+- **`none`**：没找到相关内容，注入 `[archive_status] 档案中未找到与该问题相关的记录。` 让 Claude 知道这个沉默是主动判断，不是管道故障。
+- **`unfiltered`**：`RECALL_ENABLED=False` 或 LLM 调用失败时的降级态，候选结果原样注入并加标记。
 
-The `none` verdict is what prevents hallucination: without it, an absent result looks identical to a skipped search, and Claude may confabulate. Requires `OPENROUTER_API_KEY` (or equivalent `LLM_BACKEND` config); falls back to `unfiltered` (returning raw candidates) if no LLM is available.
+**`none` 是防止幻觉的关键。** 没有它，"没找到"和"根本没搜"对下游来说看起来一样，Claude 可能用脑补来填补空白。需要 `OPENROUTER_API_KEY`（或等价的 `LLM_BACKEND` 配置）；无 LLM 时降级到 `unfiltered`。
 
-## Configuration
+## 配置
 
-All config via environment variables (or `.env` file):
+所有配置通过环境变量（或 `.env` 文件）设置：
 
-| Variable                | Default                           | Description                                                      |
-| ----------------------- | --------------------------------- | ---------------------------------------------------------------- |
-| `EMBEDDING_API_KEY`     | —                                 | **Required.** Embedding API key                                  |
-| `EMBEDDING_BASE_URL`    | `https://api.siliconflow.cn/v1`   | Embedding API base URL                                           |
-| `EMBEDDING_MODEL`       | `BAAI/bge-m3`                     | Embedding model name                                             |
-| `LANCE_DB_PATH`         | `<repo>/memory_db`                | LanceDB storage path                                             |
-| `JSONL_DIR`             | `~/.claude/projects/-root`        | **Required.** Directory of raw `*.jsonl` sessions. The `-root` suffix is an example — Claude Code names the subdirectory after your project path; check `~/.claude/projects/` for the actual name on your system. |
-| `ARCHIVE_FILE`          | `~/.claude/session_archive.md`    | Optional archive file for BM25. Leave unset to skip.            |
-| `JSONL_INDEX_FILE`      | `~/.claude/session_index.jsonl`   | session_index.jsonl used by BM25 entity path                    |
-| `BM25_ENTITY_MIN_SCORE` | `7.0`                             | Min BM25 score for entity hits to claim a guaranteed result slot |
-| `SEARCH_PORT`           | `15200`                           | Port for the search server                                       |
-| `LLM_BACKEND`           | auto (`openrouter` or `none`)     | `none` \| `siliconflow` \| `ollama` \| `api` \| `openrouter`   |
-| `OPENROUTER_API_KEY`    | —                                 | Optional: enables the Haiku recall filter                        |
-| `RECALL_MODEL`          | `anthropic/claude-haiku-4-5`      | Model for the recall filter                                      |
-| `ENRICH_MODEL`          | `anthropic/claude-haiku-4-5`      | Model for entity extraction                                      |
+| 变量 | 默认值 | 说明 |
+|------|--------|------|
+| `EMBEDDING_API_KEY` | — | **必须**，Embedding API key |
+| `EMBEDDING_BASE_URL` | `https://api.siliconflow.cn/v1` | Embedding API 地址 |
+| `EMBEDDING_MODEL` | `BAAI/bge-m3` | Embedding 模型名 |
+| `LANCE_DB_PATH` | `<repo>/memory_db` | LanceDB 存储路径 |
+| `JSONL_DIR` | `~/.claude/projects/-root` | **必须**，原始 `.jsonl` 文件目录 |
+| `ARCHIVE_FILE` | `~/.claude/session_archive.md` | 可选，BM25 用的摘要文件 |
+| `JSONL_INDEX_FILE` | `~/.claude/session_index.jsonl` | BM25 实体路径用的索引文件 |
+| `BM25_ENTITY_MIN_SCORE` | `7.0` | 实体 BM25 命中的最低分数阈值 |
+| `SEARCH_PORT` | `15200` | 搜索服务器端口 |
+| `LLM_BACKEND` | 自动检测 | `none` \| `siliconflow` \| `ollama` \| `api` \| `openrouter` |
+| `OPENROUTER_API_KEY` | — | 可选，启用 Haiku 召回过滤 |
+| `RECALL_MODEL` | `anthropic/claude-haiku-4-5` | 召回过滤模型 |
 
-See `config.example.env` for the full list.
+完整列表见 `config.example.env`。
 
 ### `BM25_ENTITY_MIN_SCORE`
 
-The entity BM25 path reserves 2 result slots for high-confidence entity hits. A hit only claims a slot if its BM25 score meets this threshold (default `7.0`). This value was tuned empirically on the author's corpus (~780 entity entries, Chinese-language conversations). You will likely need to retune it for your own data:
+实体 BM25 路径为高置信度的实体命中保留 2 个结果槽位，分数达到阈值才能占用。默认值 `7.0` 是在作者的语料（约 780 条实体，中文对话）上调出来的，你可能需要根据自己的数据重新调整：
 
-- If you see irrelevant entity results, raise the threshold.
-- If known proper nouns fail to appear, lower it.
-- Run `eval_rag.py` with `--diff` to measure the effect of changes.
+- 看到不相关的实体结果 → 提高阈值
+- 已知专有名词没出现 → 降低阈值
+- 用 `eval_rag.py --diff` 量化改动效果
 
-## LLM Backend
+## LLM 后端
 
-| Mode          | Cost | Notes |
-| ------------- | ---- | ----- |
-| `none`        | Free | Zero config, pure vector+BM25, no LLM |
-| `siliconflow` | Free | Remote API via siliconflow.cn; reuse your `EMBEDDING_API_KEY` |
-| `ollama`      | Free | Local inference; run `ollama pull qwen2.5:3b` |
-| `api`         | Paid | Any OpenAI-compatible endpoint |
-| `openrouter`  | Paid | Alias for `api`, kept for backward compatibility |
+| 模式 | 费用 | 说明 |
+|------|------|------|
+| `none` | 免费 | 零配置，纯向量+BM25，无 LLM |
+| `siliconflow` | 免费 | 远程 API，可复用 `EMBEDDING_API_KEY` |
+| `ollama` | 免费 | 本地推理，运行 `ollama pull qwen2.5:3b` |
+| `api` | 付费 | 任何 OpenAI 兼容端点 |
+| `openrouter` | 付费 | `api` 的别名，向后兼容保留 |
 
-Auto-detected: if `OPENROUTER_API_KEY` is set, `openrouter` is used; otherwise `none`.
+自动检测：设置了 `OPENROUTER_API_KEY` 则使用 `openrouter`，否则 `none`。
 
-Legacy variables `RECALL_API_KEY` and `RECALL_BASE_URL` are still recognized.
+## Eval 框架
 
-## Evaluation
+`eval_recall.py` 是这套系统的核心评估工具，直接调用真实的 `memory_recall.sh` hook（`FORCE_RECALL=1` 绕过 notice_filter），从 `/tmp/recall_eval_result.json` 读取结构化的 verdict/reason/候选数。
 
-`eval_rag.py` runs a fixed set of test queries and measures recall quality. Edit the query list in the script to match your own data:
+**重要：eval 必须走真实 hook，不能重新实现管道逻辑。** 两套实现只要不是同一份代码就会持续分叉，而且分叉是隐蔽的。
 
-```bash
-python eval_rag.py
-python eval_rag.py --diff   # compare against a saved baseline to detect regressions
-```
+查询集分两组，必须分开报指标：
 
-Each query has an expected keyword that should appear in at least one of the top-3 results. Output is a pass/fail table with scores. Run this before and after tuning `BM25_ENTITY_MIN_SCORE` or changing the index to catch regressions.
+- **recall 组**（有记录的事）：测命中率。期望 `sufficient` 或 `partial`。
+- **no_record 组**（确定没有记录的事）：测 none 率。期望 `none`。两组混报会互相掩盖问题。
 
-**Writing good eval queries:** phrase them the way you'd actually ask during a session ("what did we decide about X"), not as verbatim excerpts from the archive. Split your query list into two groups:
+示例查询集见 `eval_baseline/eval_queries.example.json`（替换成你的真实内容，不要提交进版本库）。
 
-- **Known-recorded** — events or facts you know are in the index. These should pass. They test retrieval quality.
-- **Known-unrecorded** — things that were never logged. These should return a `none` verdict. They test hallucination suppression, which is often overlooked but catches the most dangerous failure mode: a system that confidently injects fabricated "memories."
+当前基线（在作者语料上，基于真实 hook 路径）：
+- recall 组命中率：88%（25条）
+- no_record 组 none 率：5/7（2条 agent 判断边界问题，见下）
 
-## Known Pitfalls
+## 调试与可观测性
 
-**Chinese stopwords:** Without a stopword list, high-frequency function words (一起, 过, 然后) get near-zero IDF scores but still appear as BM25 tokens. This causes false positives where generic conversational fragments score above the entity threshold. The jieba stopword list in `hooks/recall_keywords.py` handles this for query-side tokenization; make sure your index-side tokenization uses the same list.
+**三条已知的静默失败模式（会让"检索出错"看起来像"没找到"）：**
 
-**Single-path RRF penalty:** RRF scoring is `1/(60 + rank)` per path. An item that appears in only one retrieval path (say BM25 but not vector) always loses to an item that appears in both paths, even if its single-path rank is high. This means low-frequency proper nouns with strong BM25 scores can disappear from the final top-k if they have no vector match. The entity guaranteed-slot mechanism exists to compensate for this — but only if `BM25_ENTITY_MIN_SCORE` is set appropriately.
+1. **hybrid_candidates 解析失败**：`/hybrid` 返回的 keyword 路径 score 是 `null`，`round(None, 3)` 抛 TypeError，整个 Python 块 fallback 到 `[]`，hybrid 路径消失。会在 `memory_recall_error.log` 里输出 `[WARN][B] hybrid_candidates 解析失败`。
 
-**Cross-query score incompatibility:** BM25 scores are not comparable across queries of different lengths. A 1-token query will always produce lower absolute scores than a 3-token query for the same passage. Don't compare `BM25_ENTITY_MIN_SCORE` hits across different query types; tune the threshold against a representative sample of your actual queries.
+2. **recall_agent JSON parse 失败**：Haiku 偶尔在 reason 字段里插入真实换行符，`json.loads` 报 `Expecting ',' delimiter`，fallback 到 `unfiltered` 把所有候选原样注入。已加换行折叠预处理修复。
 
-## Session Archive Format
+3. **notice_filter SKIP vs 检索无结果**：两者对下游都是"没有注入"，但原因完全不同。SKIP 是门控拦截，无结果是检索层找不到。`none` verdict 的 `[archive_status]` 注入就是为了区分这两种情况——让 Claude 知道"我搜了，没有"而不是"我没搜"。
 
-Plain Markdown split by `---` separators. Each section should have a `### YYYY-MM-DD` timestamp line:
+**日志文件：**
+- `memory_recall_error.log`：hook 的中间层日志，包含各路候选数、top 分、timing、WARN/ERROR
+- `server.log`：search server 日志，包含 recall_agent 的判断结果
+
+## Hook 说明
+
+**`hooks/memory_recall.sh`**：主 hook。每条用户消息触发：门控（`notice_filter.py`）→ 提取关键词（`recall_keywords.py`）→ 三路搜索（BM25 关键词路径 + hybrid + jsonl grep）→ Haiku 过滤 → 结果注入 `additionalContext`。
+
+**`hooks/recall_keywords.py`**：用 jieba 对提示词分词、去停用词、输出关键词串。可选 LLM 查询改写（`QUERY_REWRITE_ENABLED=true`），默认关闭（每条消息多一个 LLM 往返，延迟明显）。
+
+**`hooks/stop_archive.sh`**：session 结束时自动把摘要追加到 `session_archive.md`。需要 `RECALL_API_KEY`，安装为 `Stop` hook。
+
+**`hooks/notice_filter.py`**：消息门控规则。短消息（≤6字）直接 SKIP；7-15字需要检测到信号词（技术术语、情感词等）才继续；长消息直接通过。
+
+## 已知问题
+
+**中文停用词：** 不加停用词列表，高频功能词（一起、然后、过）IDF 接近零但仍作为 BM25 token，导致通用口语片段分数虚高。`hooks/recall_keywords.py` 里的 jieba 停用词表处理了查询端分词；索引端用同样的列表。
+
+**RRF 单路惩罚：** RRF 分数是 `1/(60+rank)`，只出现在一条路径上的结果永远输给两路都有的结果，即使单路排名很高。低频专有名词 BM25 分高但向量匹配弱，可能从最终 top-k 里消失。实体保留槽位机制是补偿手段，但需要 `BM25_ENTITY_MIN_SCORE` 调对。
+
+**agent 判断边界：** 当档案里有同一人物/工具的其他记录但询问的事件本身不存在时，agent 有时给 `partial` 而非 `none`（"人物存在"误读为"事件发生过"）。这是当前模型的判断边界，通过 prompt 反例可以改善但不能消除。
+
+**跨查询分数不可比：** BM25 分数不能跨查询比较。单词查询的绝对分数永远低于三词查询，不要用同一个 `BM25_ENTITY_MIN_SCORE` 阈值横向对比不同类型的查询。
+
+## Session Archive 格式
+
+用 `---` 分隔的 Markdown，每段有 `### YYYY-MM-DD` 时间戳：
 
 ```markdown
 ## Session: 2026-06-15 to 2026-06-17
 
 ### 2026-06-15 23:45 CST
 
-Summary of what happened in this conversation...
+这段对话发生了什么...
 
 ---
 
 ### 2026-06-16 14:30 CST
 
-Another day's summary...
+另一天的摘要...
 
 ---
 ```
-
-See `data/session_archive.example.md` for a complete example.
-
-## Hooks
-
-**`hooks/memory_recall.sh`** — the Claude Code hook. On each user message it: gates trivial messages via `notice_filter.py`, extracts keywords via `recall_keywords.py`, searches the server, optionally filters with Haiku, and returns results as `additionalContext`.
-
-**`hooks/recall_keywords.py`** — tokenizes the prompt with `jieba`, strips stopwords, emits keywords. Optional LLM query rewrite: set `QUERY_REWRITE_ENABLED=true` to send the last 3 turns to `RECALL_MODEL` for a condensed query ("那次的事" → "蜜雪冰城 夏日聚餐"). Note that query rewrite adds one LLM round-trip on every message through the synchronous hook, which increases per-prompt latency noticeably. It is off by default for this reason.
-
-**`hooks/stop_archive.sh`** — automatically appends a session summary to `session_archive.md` at session end. Requires `RECALL_API_KEY`. Install as a `Stop` hook in `.claude/settings.json`.
-
-## Limitations / TODO
-
-- **Date-range filtering**: timestamps are indexed but search doesn't filter by date yet.
-- **Config unification**: `build_index.py` uses its own path constants; the server uses `utils/config.py`. Worth consolidating.
-- Use `eval_rag.py` as a regression check after tuning index parameters.
 
 ## License
 
