@@ -82,8 +82,13 @@ def build_bm25_index() -> None:
                     for v in entities.values():
                         if isinstance(v, list):
                             entity_terms.extend([str(x) for x in v])
+                elif isinstance(entities, list):
+                    entity_terms.extend([str(x) for x in entities])
+                # aliases 也进 BM25（"你以后会怎么称呼这件事"的自然说法）
+                aliases = obj.get("aliases", [])
+                alias_str = " ".join(str(a) for a in aliases) if aliases else ""
                 entity_str = " ".join(entity_terms)
-                chunks.append((f"[jsonl] {date} {key}：{txt} {entity_str}".strip(), "entity"))
+                chunks.append((f"[jsonl] {date} {key}：{txt} {entity_str} {alias_str}".strip(), "entity"))
             except json.JSONDecodeError:
                 continue
 
