@@ -129,9 +129,13 @@ fi
 bm25_result=$(curl -sG "$SEARCH_SERVER/bm25" \
   --data-urlencode "q=$search_terms" \
   --data-urlencode "top_k=5" 2>>"$ERROR_LOG")
-if [ $? -ne 0 ] || [ -z "$bm25_result" ]; then
-  echo "[WARN][B] bm25 路径失败或返回空，标记降级。" >> "$ERROR_LOG"
+bm25_exit=$?
+if [ $bm25_exit -ne 0 ]; then
+  echo "[WARN][B] bm25 请求失败 exit=$bm25_exit，标记降级。" >> "$ERROR_LOG"
   degraded_paths="bm25"
+elif [ -z "$bm25_result" ]; then
+  # 正常业务：BM25 字面匹配无命中（词汇鸿沟），不是故障
+  echo "[INFO] bm25 零命中 query=$search_terms" >> "$ERROR_LOG"
 else
   while IFS= read -r line; do
     [ -n "$line" ] && results="$results[bm25] ${line:0:120}\n"
@@ -157,7 +161,8 @@ if [ -f "$BREATH_SEARCH_SCRIPT" ]; then
   pid_ob=$!
   wait $pid_hybrid $pid_ob
   if [ ! -s "$TMPDIR_RECALL/ob" ]; then
-    echo "[WARN][B] breath/OB 路径失败或返回空，标记降级。" >> "$ERROR_LOG"
+    # OB 空结果可能是正常（无相关记忆），也可能是脚本失败，按 B 类降级处理
+    echo "[WARN][B] breath/OB 路径返回空，标记降级。" >> "$ERROR_LOG"
     degraded_paths="$degraded_paths ob"
   fi
   ob_hits=$(cat "$TMPDIR_RECALL/ob")
@@ -166,7 +171,8 @@ else
 fi
 
 if [ ! -s "$TMPDIR_RECALL/hybrid" ]; then
-  echo "[WARN][B] hybrid 路径失败或返回空，标记降级。" >> "$ERROR_LOG"
+  # hybrid 空文件 = server 无响应，真故障
+  echo "[WARN][B] hybrid 路径失败（server 无响应），标记降级。" >> "$ERROR_LOG"
   degraded_paths="$degraded_paths hybrid"
 fi
 
