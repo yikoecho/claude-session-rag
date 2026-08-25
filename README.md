@@ -57,7 +57,11 @@ python build_index.py
 启动搜索服务器：
 
 ```bash
-python server.py
+# 入口说明：
+# search_server.py  —— 推荐，完整入口（初始化 LanceDB、FTS、recall agent，然后启动 HTTP 服务）
+# server.py         —— HTTP handler + 路由定义，由 search_server.py 导入；也可以单独运行
+# search.py         —— 命令行检索工具，不启动服务，直接输出检索结果
+python search_server.py
 ```
 
 测试：
@@ -142,8 +146,8 @@ curl "http://127.0.0.1:15200/hybrid?q=你的查询&top_k=3"
 | `none` | 免费 | 零配置，纯向量+BM25，无 LLM |
 | `siliconflow` | 免费 | 远程 API，可复用 `EMBEDDING_API_KEY` |
 | `ollama` | 免费 | 本地推理，运行 `ollama pull qwen2.5:3b` |
-| `api` | 付费 | 任何 OpenAI 兼容端点 |
-| `openrouter` | 付费 | `api` 的别名，向后兼容保留 |
+| `api` | 付费/免费 | 任何 OpenAI 兼容端点（付费：OpenRouter、Anthropic API；免费：Groq、Cerebras、OpenRouter 免费模型如 `meta-llama/llama-3.1-8b-instruct:free`）|
+| `openrouter` | 付费/免费 | `api` 的别名，向后兼容保留 |
 
 自动检测：设置了 `OPENROUTER_API_KEY` 则使用 `openrouter`，否则 `none`。
 
@@ -161,8 +165,13 @@ curl "http://127.0.0.1:15200/hybrid?q=你的查询&top_k=3"
 示例查询集见 `eval_baseline/eval_queries.example.json`（替换成你的真实内容，不要提交进版本库）。
 
 当前基线（在作者语料上，基于真实 hook 路径）：
-- recall 组命中率：88%（25条）
-- no_record 组 none 率：5/7（2条 agent 判断边界问题，见下）
+- recall 组命中率：96%（25条）
+- no_record 组 none 率：7/7，编造率 0%
+- 测量条件：search_server 健康（无端口冲突，`ss -tlnp | grep 15200` 确认）、`FORCE_RECALL=1` 直调 hook、三次连跑无波动
+
+**关于 eval 环境的教训：** 三次连跑结果一致才是基线，单次读数只是读数。这套系统在部署期间踩到了三次 eval 环境污染（索引路径写错、eval 脚本逻辑分叉、server 进程崩溃循环），每次都产生了一个看起来合理的数字（88%、84%），但地基是坏的。**仪器比被测系统更容易坏。** 任何 eval 跑分前，先确认 search_server 进程健康（`systemctl status search_server`），再确认端口没被孤儿进程占用（`ss -tlnp | grep 15200`）。
+
+**关于三次连跑结果完全一致：** 这可能意味着 25 条 query 的候选质量都在 Haiku 的决策边界之外（好事），也可能意味着 server 端或 agent 层有缓存命中。如果未来某次改动让分数变化，但三次仍然完全一致，就需要检查是否有缓存在起作用，避免误把缓存当基线。
 
 ## 调试与可观测性
 
@@ -194,7 +203,7 @@ curl "http://127.0.0.1:15200/hybrid?q=你的查询&top_k=3"
 
 **RRF 单路惩罚：** RRF 分数是 `1/(60+rank)`，只出现在一条路径上的结果永远输给两路都有的结果，即使单路排名很高。低频专有名词 BM25 分高但向量匹配弱，可能从最终 top-k 里消失。实体保留槽位机制是补偿手段，但需要 `BM25_ENTITY_MIN_SCORE` 调对。
 
-**agent 判断边界：** 当档案里有同一人物/工具的其他记录但询问的事件本身不存在时，agent 有时给 `partial` 而非 `none`（"人物存在"误读为"事件发生过"）。这是当前模型的判断边界，通过 prompt 反例可以改善但不能消除。
+**自然语言指代词命中率：** "方案一"、"那篇小论文"、"song-card"这类指代型 query 命中率低。索引记录的是实现语言（组件名、技术细节），而用户事后的自然说法是生活语言（"方案一"、"那个衬衫的功能"）。根本解法是写入时同时生成 aliases 字段（"你以后会怎么称呼这件事"），并对历史记录批量回填。查询侧改写对纯指代词无效——LLM 在没有上下文时无法把"方案一"扩展成正确的实指。
 
 **跨查询分数不可比：** BM25 分数不能跨查询比较。单词查询的绝对分数永远低于三词查询，不要用同一个 `BM25_ENTITY_MIN_SCORE` 阈值横向对比不同类型的查询。
 

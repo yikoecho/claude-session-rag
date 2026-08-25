@@ -1,0 +1,360 @@
+#!/bin/bash
+# hooks/memory_recall.sh.example
+#
+# UserPromptSubmit hook: 搜索相关记忆并注入上下文
+# 用法：cp hooks/memory_recall.sh.example ~/.claude/hooks/memory_recall.sh
+#       按需修改下方路径变量，然后在 Claude Code settings 里注册为 UserPromptSubmit hook
+#
+# 架构：三层
+#   Layer 1: notice_filter.py  —— 门控（短消息/纯技术操作 SKIP）
+#   Layer 2: 三路搜索          —— hybrid（vec+BM25）+ OB breath（可选）+ jsonl grep
+#   Layer 3: recall agent      —— Haiku 三档判定（sufficient/partial/none）
+
+set -o pipefail
+
+# ── 配置：按你的实际路径修改 ──────────────────────────────────────────────────
+CLAUDE_DIR="${CLAUDE_DIR:-$HOME/.claude}"           # Claude Code 数据目录
+PROJECT_DIR="${PROJECT_DIR:-$HOME/semantic}"         # 本项目根目录
+
+NOTICE_FILTER_SCRIPT="${NOTICE_FILTER_SCRIPT:-$PROJECT_DIR/hooks/notice_filter.py}"
+RECALL_KEYWORDS_SCRIPT="${RECALL_KEYWORDS_SCRIPT:-$PROJECT_DIR/hooks/recall_keywords.py}"
+BREATH_SEARCH_SCRIPT="${BREATH_SEARCH_SCRIPT:-$PROJECT_DIR/hooks/breath_search.py}"  # 可选
+
+MEMORY_DIR="${MEMORY_DIR:-$CLAUDE_DIR/projects/-root/memory}"  # Claude Code 自动记忆目录（可选）
+SESSION_FILE="${SESSION_FILE:-$CLAUDE_DIR/last_session.md}"    # 手写 session 摘要（可选）
+ARCHIVE_FILE="${ARCHIVE_FILE:-$CLAUDE_DIR/session_archive.md}" # 压缩后的 session 存档（可选）
+JSONL_FILE="${JSONL_FILE:-$CLAUDE_DIR/session_index.jsonl}"    # 索引条目（key/text/date）
+
+SEARCH_SERVER="http://127.0.0.1:15200"
+ERROR_LOG="${ERROR_LOG:-$CLAUDE_DIR/memory_recall_error.log}"
+RECALL_LOG="${RECALL_LOG:-$CLAUDE_DIR/memory_recall_result.log}"
+# ─────────────────────────────────────────────────────────────────────────────
+
+input=$(cat)
+prompt=$(echo "$input" | python3 -c "import sys,json; d=json.load(sys.stdin); print(d.get('prompt',''))" 2>/dev/null)
+
+if [ -z "$prompt" ]; then
+  exit 0
+fi
+
+# ── 路径检查（启动时用 WARN 暴露缺失，不静默降级）──────────────────────────
+for var_name in NOTICE_FILTER_SCRIPT RECALL_KEYWORDS_SCRIPT; do
+  eval _path=\$$var_name
+  if [ ! -f "$_path" ]; then
+    echo "[WARN] $var_name 不存在: $_path" >> "$ERROR_LOG"
+  fi
+done
+
+# ── Layer 1: 门控 ──────────────────────────────────────────────────────────
+# FORCE_RECALL=1 绕过 filter（仅用于 eval / 调试，不写入 .env）
+if [ "${FORCE_RECALL:-0}" = "1" ]; then
+  echo "[FORCE_RECALL] filter bypassed" >> "$ERROR_LOG"
+else
+  # clean_text 由 recall_keywords.py 第三行输出（剥掉 XML/Telegram 标签的纯文本）
+  # 门控用 clean_text 而不是原始 prompt，避免 XML 标签触发或抑制信号词匹配
+  tmp_notice=$(echo "$prompt" | python3 "$RECALL_KEYWORDS_SCRIPT" 2>>"$ERROR_LOG")
+  clean_for_filter=$(echo "$tmp_notice" | sed -n '3p')
+  notice_result=$(echo "${clean_for_filter:-$prompt}" | python3 "$NOTICE_FILTER_SCRIPT" 2>>"$ERROR_LOG")
+  if [ "$notice_result" = "SKIP" ]; then
+    exit 0
+  fi
+fi
+
+# ── 关键词提取 ─────────────────────────────────────────────────────────────
+# [A类错误] recall_keywords 失败 → 写 ERROR 并中止，不带空值继续
+py_out=$(echo "$prompt" | python3 "$RECALL_KEYWORDS_SCRIPT" 2>>"$ERROR_LOG")
+if [ $? -ne 0 ] || [ -z "$py_out" ]; then
+  echo "[ERROR][A] recall_keywords 失败，中止 hook。输入: ${prompt:0:80}" >> "$ERROR_LOG"
+  python3 -c "import json; print(json.dumps({'hookSpecificOutput': {'hookEventName': 'UserPromptSubmit', 'additionalContext': '[记忆召回]\n[recall_error] 关键词提取异常，本轮无法召回。'}}))"
+  exit 0
+fi
+search_terms=$(echo "$py_out" | sed -n '1p')
+retro_query=$(echo "$py_out" | sed -n '2p')
+clean_text=$(echo "$py_out" | sed -n '3p')
+
+if [ -z "$search_terms" ]; then
+  echo "[ERROR][A] search_terms 为空，中止 hook。" >> "$ERROR_LOG"
+  exit 0
+fi
+
+TMPDIR_RECALL=$(mktemp -d)
+trap "rm -rf $TMPDIR_RECALL" EXIT
+
+t_search_start=$(date +%s%3N)
+results=""
+degraded_paths=""
+
+# ── Layer 2a: 本地文件 grep（高置信度，无网络依赖）──────────────────────────
+rg_search() {
+  local pattern="$1"; shift
+  local out exit_code
+  out=$(/usr/bin/rg -i "$pattern" "$@" 2>>"$ERROR_LOG")
+  exit_code=$?
+  [ $exit_code -eq 0 ] && echo "$out"
+}
+
+[ -f "$SESSION_FILE" ] && {
+  hits=$(rg_search "$search_terms" -m 3 --no-filename "$SESSION_FILE" | head -3)
+  [ -n "$hits" ] && results="$results$hits\n"
+}
+[ -d "$MEMORY_DIR" ] && {
+  hits=$(rg_search "$search_terms" -m 5 --no-filename -g '!MEMORY.md' "$MEMORY_DIR" | head -5)
+  [ -n "$hits" ] && results="$results$hits\n"
+}
+
+# session_index.jsonl grep
+# B fix: 用 grep -Ei（search_terms 是 a|b|c 格式，BRE 不识别 | 为 OR，需 ERE）
+# B fix: 一个 python 进程提取多字段，原来每行多次冷启动
+jsonl_hits=""
+if [ -f "$JSONL_FILE" ]; then
+  while IFS= read -r line; do
+    fields=$(echo "$line" | python3 -c "
+import sys,json
+d=json.loads(sys.stdin.read())
+print(d.get('date',''))
+print(d.get('key',''))
+print(d.get('text',''))
+" 2>/dev/null)
+    date=$(echo "$fields" | sed -n '1p')
+    key=$(echo "$fields" | sed -n '2p')
+    text=$(echo "$fields" | sed -n '3p')
+    jsonl_hits="$jsonl_hits[jsonl] ${date} ${key}：${text}\n"
+  done < <(grep -Ei "$search_terms" "$JSONL_FILE" 2>/dev/null | head -3)
+fi
+
+# ── Layer 2b: BM25 检索（通过 search_server）──────────────────────────────
+# [B类错误] BM25 失败 → 写 WARN，标记降级，继续跑其他路（不中止）
+bm25_result=$(curl -sG "$SEARCH_SERVER/bm25" \
+  --data-urlencode "q=$search_terms" \
+  --data-urlencode "top_k=5" 2>>"$ERROR_LOG")
+if [ $? -ne 0 ] || [ -z "$bm25_result" ]; then
+  echo "[WARN][B] bm25 路径失败或返回空，标记降级。" >> "$ERROR_LOG"
+  degraded_paths="bm25"
+else
+  while IFS= read -r line; do
+    [ -n "$line" ] && results="$results[bm25] ${line:0:120}\n"
+  done <<< "$bm25_result"
+fi
+
+# ── Layer 2c: hybrid 检索 + OB breath（并行）───────────────────────────────
+_hybrid_q="${clean_text:-$prompt}"
+
+# retro_query 传给向量路做语义改写；BM25 两路用原 clean_text
+# [B类错误] hybrid 失败 → 写 WARN，标记降级
+curl -s -G "$SEARCH_SERVER/hybrid" \
+  --data-urlencode "q=$_hybrid_q" \
+  --data-urlencode "retro_q=$retro_query" \
+  --data-urlencode "top_k=5" \
+  > "$TMPDIR_RECALL/hybrid" 2>>"$ERROR_LOG" &
+pid_hybrid=$!
+
+ob_hits=""
+if [ -f "$BREATH_SEARCH_SCRIPT" ]; then
+  ob_query="${retro_query:-$prompt}"
+  python3 "$BREATH_SEARCH_SCRIPT" "$ob_query" > "$TMPDIR_RECALL/ob" 2>>"$ERROR_LOG" &
+  pid_ob=$!
+  wait $pid_hybrid $pid_ob
+  if [ ! -s "$TMPDIR_RECALL/ob" ]; then
+    echo "[WARN][B] breath/OB 路径失败或返回空，标记降级。" >> "$ERROR_LOG"
+    degraded_paths="$degraded_paths ob"
+  fi
+  ob_hits=$(cat "$TMPDIR_RECALL/ob")
+else
+  wait $pid_hybrid
+fi
+
+if [ ! -s "$TMPDIR_RECALL/hybrid" ]; then
+  echo "[WARN][B] hybrid 路径失败或返回空，标记降级。" >> "$ERROR_LOG"
+  degraded_paths="$degraded_paths hybrid"
+fi
+
+# 解析 hybrid JSON → dict 列表（含 source/text/score），供 /recall 三档判定使用
+# B fix: score 字段可能为 null（keyword 路径），用 `or 0` 而非 `.get('score', 0)`
+hybrid_candidates=$(python3 -c "
+import sys, json
+try:
+    data = json.load(open('$TMPDIR_RECALL/hybrid'))
+    out = []
+    for item in data.get('results', []):
+        out.append({
+            'source': item.get('source', ''),
+            'text': item.get('text', '')[:300],
+            'score': round(item.get('score') or 0, 3),  # 'or 0' 处理 score=null
+        })
+    print(json.dumps(out, ensure_ascii=False))
+except Exception as e:
+    print(f'[WARN][B] hybrid_candidates 解析失败: {e}', file=sys.stderr)
+    print('[]')
+" 2>>"$ERROR_LOG")
+
+[ -n "$ob_hits" ] && results="$results[OB] $ob_hits\n"
+
+# 诊断日志
+{
+  hybrid_cnt=$(echo "$hybrid_candidates" | python3 -c "import sys,json;d=json.load(sys.stdin);print(len(d))" 2>/dev/null || echo "?")
+  hybrid_top=$(echo "$hybrid_candidates" | python3 -c "
+import sys,json
+d=json.load(sys.stdin)
+if d: print(f'{d[0][\"source\"]} score={d[0][\"score\"]}')
+else: print('(empty)')
+" 2>/dev/null || echo "?")
+  _degraded="${degraded_paths:-(none)}"
+  echo "[recall_candidates] hybrid=${hybrid_cnt} top=(${hybrid_top}) ob=$([ -n \"$ob_hits\" ] && echo 'yes' || echo 'no') degraded=${_degraded}"
+} >> "$ERROR_LOG"
+
+t_search_end=$(date +%s%3N)
+echo "[recall_timing] search层: $((t_search_end - t_search_start))ms" >> "$ERROR_LOG"
+
+# ── 构建候选列表 ──────────────────────────────────────────────────────────
+session_candidates=$(echo -e "$results" | grep -v '^$' | grep -v '^\[OB\]' | head -8 | python3 -c "
+import sys, json
+lines = [l.rstrip() for l in sys.stdin if l.strip() and not l.startswith('[OB')]
+out = [{'source': 'session_memory', 'text': l[:300], 'score': 0.0} for l in lines]
+print(json.dumps(out, ensure_ascii=False))
+" 2>/dev/null)
+
+# [A类错误] 候选构造失败 → 写 ERROR 并中止
+all_candidates=$(HYBRID_JSON="$hybrid_candidates" SESSION_JSON="$session_candidates" python3 -c "
+import sys, json, os
+h_raw = os.environ.get('HYBRID_JSON', '[]') or '[]'
+s_raw = os.environ.get('SESSION_JSON', '[]') or '[]'
+try:
+    h = json.loads(h_raw)
+except Exception as e:
+    print(f'[ERROR][A] HYBRID_JSON 解析失败: {e}', file=sys.stderr); h = []
+try:
+    s = json.loads(s_raw)
+except Exception as e:
+    print(f'[ERROR][A] SESSION_JSON 解析失败: {e}', file=sys.stderr); s = []
+print(json.dumps((h + s)[:10], ensure_ascii=False))
+" 2>>"$ERROR_LOG")
+if [ $? -ne 0 ]; then
+  echo "[ERROR][A] all_candidates 构造崩溃，中止 hook。" >> "$ERROR_LOG"
+  exit 0
+fi
+
+if [ -z "$all_candidates" ] || [ "$all_candidates" = "[]" ]; then
+  [ -z "$jsonl_hits" ] && [ -z "$ob_hits" ] && exit 0
+  all_candidates="[]"
+fi
+
+# ── Layer 3: Recall Agent（三档判定）─────────────────────────────────────
+t_recall_start=$(date +%s%3N)
+recall_result=$(PROMPT_TEXT="$prompt" CANDIDATES_JSON="$all_candidates" python3 -c "
+import sys, json, urllib.request, os
+
+_log = open('$ERROR_LOG', 'a')
+def _dbg(msg): _log.write(f'[recall_agent_dbg] {msg}\n'); _log.flush()
+
+prompt = os.environ['PROMPT_TEXT']
+candidates_raw = os.environ.get('CANDIDATES_JSON', '[]')
+_dbg(f'CANDIDATES_JSON_LEN={len(candidates_raw)} preview={candidates_raw[:60]}')
+try:
+    candidates = json.loads(candidates_raw)
+    _dbg(f'candidates_count={len(candidates)}')
+except Exception as e:
+    _dbg(f'JSON_PARSE_FAIL: {e}')
+    candidates = []
+
+if not candidates:
+    _dbg('no candidates → VERDICT_NONE')
+    print('__VERDICT_NONE__')
+    if os.environ.get('FORCE_RECALL') == '1':
+        with open('/tmp/recall_eval_result.json', 'w') as _f:
+            json.dump({'verdict': 'none', 'reason': 'no candidates', 'candidates_count': 0, 'top_scores': {}, 'candidates_detail': []}, _f)
+    sys.exit(0)
+
+data = json.dumps({'prompt': prompt, 'candidates': candidates}).encode()
+req = urllib.request.Request(
+    '$SEARCH_SERVER/recall',
+    data=data,
+    headers={'Content-Type': 'application/json'},
+    method='POST'
+)
+try:
+    with urllib.request.urlopen(req, timeout=8) as resp:
+        raw = resp.read()
+        # B fix: Haiku 偶尔在 reason 字段里插入真实换行，json.loads 会报错——先折叠
+        text = raw.decode()
+        text_clean = ' '.join(text.splitlines())
+        try:
+            body = json.loads(text_clean)
+        except Exception:
+            body = json.loads(text)  # fallback 原始文本
+
+        verdict = body.get('verdict', 'partial')
+        results = body.get('results', candidates)
+        reason = body.get('reason', '')
+        _dbg(f'verdict={verdict} results_count={len(results)}')
+
+        print(f'__VERDICT_{verdict.upper()}__')
+        for item in results:
+            print(item.get('text', '') if isinstance(item, dict) else str(item))
+
+        if os.environ.get('FORCE_RECALL') == '1':
+            top_scores = {}
+            for c in candidates:
+                src = c.get('source', 'unknown')
+                s = round(c.get('score') or 0, 4)
+                if src not in top_scores or s > top_scores[src]:
+                    top_scores[src] = s
+            with open('/tmp/recall_eval_result.json', 'w') as _f:
+                json.dump({'verdict': verdict, 'reason': reason, 'candidates_count': len(candidates), 'top_scores': top_scores, 'candidates_detail': [{'source': c.get('source',''), 'text': c.get('text','')[:120], 'score': round(c.get('score') or 0, 4)} for c in candidates]}, _f, ensure_ascii=False)
+
+except Exception as e:
+    _dbg(f'HTTP_FAIL: {e}')
+    # [B类降级] agent 失败 → 直接注入 top-N，明确标记
+    print('__VERDICT_AGENT_FAILED__')
+    for item in candidates[:5]:
+        print(item.get('text', '') if isinstance(item, dict) else str(item))
+    if os.environ.get('FORCE_RECALL') == '1':
+        with open('/tmp/recall_eval_result.json', 'w') as _f:
+            json.dump({'verdict': 'unfiltered', 'reason': str(e), 'candidates_count': len(candidates), 'top_scores': {}, 'candidates_detail': []}, _f)
+" 2>>"$ERROR_LOG")
+
+recall_verdict=$(echo "$recall_result" | grep '^__VERDICT_' | sed 's/__VERDICT_//;s/__.*//' | tr '[:upper:]' '[:lower:]')
+recall_texts=$(echo "$recall_result" | grep -v '^__VERDICT_' | grep -v '^$')
+
+t_recall_end=$(date +%s%3N)
+post_agent_cnt=$(echo "$recall_texts" | grep -c '[^ ]' 2>/dev/null || echo "?")
+echo "[recall_timing] recall_agent: $((t_recall_end - t_recall_start))ms | total: $((t_recall_end - t_search_start))ms | verdict=${recall_verdict} | post_agent_lines=${post_agent_cnt}" >> "$ERROR_LOG"
+
+# ── 构建注入内容 ─────────────────────────────────────────────────────────
+recall_block=""
+case "$recall_verdict" in
+  sufficient)
+    recall_block="$recall_texts" ;;
+  partial)
+    [ -n "$recall_texts" ] && recall_block="以下内容与问题相关但可能未直接回答，仅供参考：
+$recall_texts" ;;
+  none)
+    recall_block="[archive_status] 档案中未找到与该问题相关的记录。" ;;
+  agent_failed)
+    echo "[recall_agent] agent_failed → injecting top-N directly" >> "$ERROR_LOG"
+    [ -n "$recall_texts" ] && recall_block="[agent_failed_fallback] 以下内容未经 agent 过滤：
+$recall_texts" ;;
+  *)
+    recall_block="$recall_texts" ;;
+esac
+
+if [ -z "$recall_block" ] && [ -z "$jsonl_hits" ] && [ -z "$ob_hits" ]; then
+  exit 0
+fi
+
+final_content=""
+[ -n "$recall_block" ] && final_content="$recall_block"
+[ -n "$jsonl_hits" ]   && final_content="$final_content\n$(echo -e "$jsonl_hits" | grep -v '^$')"
+[ -n "$ob_hits" ]      && final_content="$final_content\n[OB]\n$ob_hits"
+
+{
+  echo "=== $(date '+%Y-%m-%d %H:%M:%S') | keywords: $search_terms"
+  echo -e "$final_content" | grep -v '^$' | head -10
+  echo ""
+} >> "$RECALL_LOG"
+
+python3 -c "
+import sys, json
+content = sys.stdin.read()
+print(json.dumps({'hookSpecificOutput': {'hookEventName': 'UserPromptSubmit', 'additionalContext': content}}))
+" <<< "[记忆召回]
+${final_content}"
