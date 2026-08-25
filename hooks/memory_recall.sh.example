@@ -32,6 +32,7 @@ RECALL_LOG="${RECALL_LOG:-$CLAUDE_DIR/memory_recall_result.log}"
 
 input=$(cat)
 prompt=$(echo "$input" | python3 -c "import sys,json; d=json.load(sys.stdin); print(d.get('prompt',''))" 2>/dev/null)
+# 2>/dev/null 此处安全：失败时 prompt 为空，下方立即检查并 exit 0，不会静默继续
 
 if [ -z "$prompt" ]; then
   exit 0
@@ -114,12 +115,13 @@ d=json.loads(sys.stdin.read())
 print(d.get('date',''))
 print(d.get('key',''))
 print(d.get('text',''))
-" 2>/dev/null)
+" 2>>"$ERROR_LOG")  # 错误写日志而不是静默丢弃——jsonl 字段解析失败会让这条命中从结果里消失
     date=$(echo "$fields" | sed -n '1p')
     key=$(echo "$fields" | sed -n '2p')
     text=$(echo "$fields" | sed -n '3p')
     jsonl_hits="$jsonl_hits[jsonl] ${date} ${key}：${text}\n"
   done < <(grep -Ei "$search_terms" "$JSONL_FILE" 2>/dev/null | head -3)
+  # 2>/dev/null 此处安全：grep 无匹配返回1（正常），文件不存在已被 -f 守卫在外层
 fi
 
 # ── Layer 2b: BM25 检索（通过 search_server）──────────────────────────────
@@ -211,7 +213,7 @@ import sys, json
 lines = [l.rstrip() for l in sys.stdin if l.strip() and not l.startswith('[OB')]
 out = [{'source': 'session_memory', 'text': l[:300], 'score': 0.0} for l in lines]
 print(json.dumps(out, ensure_ascii=False))
-" 2>/dev/null)
+" 2>>"$ERROR_LOG")  # 错误写日志——session_candidates 构造失败会让本地文件命中全部丢失
 
 # [A类错误] 候选构造失败 → 写 ERROR 并中止
 all_candidates=$(HYBRID_JSON="$hybrid_candidates" SESSION_JSON="$session_candidates" python3 -c "
