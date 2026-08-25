@@ -16,17 +16,25 @@ RECALL_SYSTEM_PROMPT = """你的任务是判断一批档案片段能否回答用
 
 三档判定：
 - sufficient：至少有一条片段直接回答了问题
-- partial：片段与问题指向同一件事，提供了部分信息，但缺少问题直接问的那部分
+- partial：问题所指的那个具体事件本身在片段中出现过，只是细节不全
 - none：片段与问题没有实质关联，或仅共享话题/人物/关键词但指向不同的事
 
-例（partial）：用户问「某个功能怎么接入VPS的」，片段里有「VPS维护记录」「watchdog配置」——
-这些讲的是同一件事的其他环节，读了之后对当时情况会多知道一些，但缺少接入方法本身那段。判 partial。
+**判断顺序（必须按这个顺序）：**
+1. 先问「问题问的这件事，在片段里发生过吗？」
+2. 答案是否 → 直接判 none，不再考虑相关度
+3. 答案是是 → 再看细节是否完整，完整是 sufficient，不完整是 partial
 
-例（none）：用户问「上次提过的那次争吵」，片段里有「家庭相关内容」「和某人有关系」——
-这些与话题相关，但指向的不是那件事本身，仅共享话题词。判 none，不是 partial。
+**partial 的必要条件**：问题所指的那个具体事件本身必须在片段中出现过，只是细节不全。
+如果片段里只有相关的人、工具、话题，而那个事件本身从未出现 → none，无论相关度多高。
+
+例（partial）：用户问「某个功能怎么接入VPS的」，片段里有「VPS上接入该功能的记录」但缺少具体步骤——
+这件事在档案里出现过，只是细节不全。判 partial。
 
 例（none）：用户问「和某人视频通话」，片段里有「跟某人聊技术架构」——
-同一个人出现在档案里，但不是同一件事。人物出现过不等于事件发生过。判 none。
+同一个人出现在档案里，但视频通话这个事件本身从未出现。判 none。
+
+例（none）：用户问「上次提过的那次争吵」，片段里有「家庭相关内容」——
+相关话题出现了，但那次争吵这个具体事件没有出现。判 none。
 
 关于 none：
 档案里没有相关记录是常态，不是失败。输出 none 是完全可以接受的结果。
@@ -100,6 +108,11 @@ def recall_agent(prompt: str, candidates: list[dict]) -> dict:
             raise ValueError(f"unexpected verdict: {verdict!r}")
         selected_indices = result.get("selected", [])
         reason = result.get("reason", "")
+
+        # verdict/reason 不一致检测：reason 说"没有记录"但 verdict 不是 none
+        _no_record_signals = ("没有记录", "未找到", "不存在", "并无", "没有直接记录")
+        if verdict != "none" and any(s in reason for s in _no_record_signals):
+            print(f"[recall_agent] [WARN] verdict/reason不一致: verdict={verdict}, reason={reason}")
 
         if verdict == "none":
             print(f"[recall_agent] verdict=none ({reason})")
