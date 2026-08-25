@@ -17,7 +17,7 @@ from pathlib import Path
 
 import numpy as np
 
-from index.bm25 import bm25_search_raw
+from index.bm25 import bm25_search_raw, bm25_aliases_fallback
 from index.vector import vector_search_raw, get_table, get_client
 from utils.config import DEDUP_THRESHOLD, EMBEDDING_MODEL, JSONL_DIR, BM25_ENTITY_MIN_SCORE
 
@@ -51,6 +51,8 @@ def hybrid_search_split(query: str, top_k: int = 5, retro_query: str = "") -> di
     bm25_entity = []
     for item in bm25_all:
         src = item.get("source", "archive")
+        if src == "aliases":
+            continue  # aliases 不进主路
         entry = {"text": item["text"], "score": round(item["score"], 6),
                  "source": "bm25_archive" if src == "archive" else "bm25_entity"}
         if src == "archive":
@@ -60,7 +62,23 @@ def hybrid_search_split(query: str, top_k: int = 5, retro_query: str = "") -> di
             if len(bm25_entity) < top_k:
                 bm25_entity.append(entry)
 
-    return {"vec": vec_results, "bm25_archive": bm25_archive, "bm25_entity": bm25_entity, "_vec_map": vec_map}
+    # aliases 兜底：仅在三路均无结果时启用，不能挤位
+    aliases_fallback = []
+    VEC_ZERO_THRESHOLD = 0.35
+    BM25_ZERO_THRESHOLD = 3.0
+    vec_top_score = vec_results[0]["score"] if vec_results else 0.0
+    bm25_top_score = max(
+        (bm25_archive[0]["score"] if bm25_archive else 0.0),
+        (bm25_entity[0]["score"] if bm25_entity else 0.0),
+    )
+    if vec_top_score < VEC_ZERO_THRESHOLD and bm25_top_score < BM25_ZERO_THRESHOLD:
+        candidates = bm25_aliases_fallback(query, top_k=top_k)
+        if candidates:
+            print(f"[hybrid] aliases 兜底触发 query='{query[:40]}' found={len(candidates)}")
+            aliases_fallback = candidates
+
+    return {"vec": vec_results, "bm25_archive": bm25_archive, "bm25_entity": bm25_entity,
+            "aliases_fallback": aliases_fallback, "_vec_map": vec_map}
 
 
 def hybrid_search(query: str, top_k: int = 5, retro_query: str = "") -> list[dict]:
@@ -76,6 +94,7 @@ def hybrid_search(query: str, top_k: int = 5, retro_query: str = "") -> list[dic
     bm25_archive = split["bm25_archive"]
     bm25_entity = split["bm25_entity"]
     vec_map = split["_vec_map"]
+    aliases_fallback = split.get("aliases_fallback", [])
 
     # 精确关键词匹配：按 jieba 分词后逐词 LIKE，补偿 BM25/FTS 对中文无效的问题
     # 用分词词语而非完整 query，否则子串匹配几乎不可能命中
@@ -144,6 +163,11 @@ def hybrid_search(query: str, top_k: int = 5, retro_query: str = "") -> list[dic
 
     remaining_slots = max(0, top_k - len(kw_items) - len(guaranteed_entity))
     merged = kw_items + guaranteed_entity + pool_sorted[:remaining_slots]
+
+    # aliases 兜底：split 层已通过阈值判定（vec<0.35 且 bm25<3.0），aliases_fallback 非空即为触发
+    # 追加到 merged 末尾，不挤位
+    if aliases_fallback:
+        merged = merged + aliases_fallback
 
     merged = _dedup_by_vector(merged, DEDUP_THRESHOLD, vec_map)
     return merged[:top_k]

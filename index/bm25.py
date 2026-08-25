@@ -84,11 +84,13 @@ def build_bm25_index() -> None:
                             entity_terms.extend([str(x) for x in v])
                 elif isinstance(entities, list):
                     entity_terms.extend([str(x) for x in entities])
-                # aliases 也进 BM25（"你以后会怎么称呼这件事"的自然说法）
-                aliases = obj.get("aliases", [])
-                alias_str = " ".join(str(a) for a in aliases) if aliases else ""
                 entity_str = " ".join(entity_terms)
-                chunks.append((f"[jsonl] {date} {key}：{txt} {entity_str} {alias_str}".strip(), "entity"))
+                chunks.append((f"[jsonl] {date} {key}：{txt} {entity_str}".strip(), "entity"))
+                # aliases 单独一路，不进主检索池，供零命中兜底用
+                aliases = obj.get("aliases", [])
+                if aliases:
+                    alias_str = " ".join(str(a) for a in aliases)
+                    chunks.append((f"[jsonl_alias] {date} {key}：{alias_str}".strip(), "aliases"))
             except json.JSONDecodeError:
                 continue
 
@@ -116,7 +118,9 @@ def bm25_search(query: str, top_k: int = 5) -> str:
         for i in ranked:
             if scores[i] <= 0:
                 break
-            text, _ = _bm25_chunks[i]
+            text, source = _bm25_chunks[i]
+            if source == "aliases":
+                continue  # aliases 不进主路，只供零命中兜底
             snippet = text[:200].replace("\n", " ")
             lines.append(snippet)
         return "\n".join(lines)
@@ -135,6 +139,26 @@ def bm25_search_raw(query: str, top_k: int = 20) -> list[dict]:
                 break
             text, source = _bm25_chunks[i]
             results.append({"text": text, "source": source, "score": float(scores[i])})
+        return results
+
+
+def bm25_aliases_fallback(query: str, top_k: int = 5) -> list[dict]:
+    """仅检索 aliases source 的 chunk，供零命中兜底用。"""
+    with _bm25_lock:
+        if _bm25_index is None or not _bm25_chunks:
+            return []
+        scores = _bm25_index.get_scores(_tokenize(query))
+        ranked = sorted(range(len(scores)), key=lambda i: scores[i], reverse=True)
+        results = []
+        for i in ranked:
+            if scores[i] <= 0:
+                break
+            text, source = _bm25_chunks[i]
+            if source != "aliases":
+                continue
+            results.append({"text": text, "source": "aliases_fallback", "score": float(scores[i])})
+            if len(results) >= top_k:
+                break
         return results
 
 
