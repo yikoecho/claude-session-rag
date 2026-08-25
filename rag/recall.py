@@ -3,6 +3,7 @@ rag/recall.py — /recall 端点的 Haiku 筛选逻辑（三档判定版）
 """
 
 import json
+import re
 
 import httpx
 
@@ -96,12 +97,28 @@ def recall_agent(prompt: str, candidates: list[dict]) -> dict:
         data = resp.json()
         text = data["choices"][0]["message"]["content"].strip()
         text = text.replace("```json", "").replace("```", "").strip()
-        # Haiku 偶尔在 reason 里插真换行，json.loads 会炸——先折叠
+        # 先尝试整体 parse（折叠换行以防 Haiku 插入真换行）
         text_clean = " ".join(text.splitlines())
+        result = None
         try:
             result = json.loads(text_clean)
         except json.JSONDecodeError:
-            result = json.loads(text)  # fallback 原始文本
+            pass
+        # fallback：reason 里可能有未转义引号，用正则逐字段提取
+        if result is None:
+            verdict_m = re.search(r'"verdict"\s*:\s*"(sufficient|partial|none)"', text)
+            selected_m = re.search(r'"selected"\s*:\s*(\[[^\]]*\])', text)
+            reason_m = re.search(r'"reason"\s*:\s*"(.*?)"(?:\s*[,}])', text, re.DOTALL)
+            if not verdict_m:
+                raise json.JSONDecodeError("cannot extract verdict", text, 0)
+            verdict_val = verdict_m.group(1)
+            try:
+                selected_val = json.loads(selected_m.group(1)) if selected_m else []
+            except Exception:
+                selected_val = []
+            reason_val = reason_m.group(1) if reason_m else ""
+            result = {"verdict": verdict_val, "selected": selected_val, "reason": reason_val}
+            print(f"[recall_agent] [WARN][fallback] 正则提取 verdict={verdict_val}")
 
         verdict = result.get("verdict")
         if verdict not in ("sufficient", "partial", "none"):
