@@ -1,16 +1,17 @@
 # 私有数据 — 永不入库
-eval_baseline/*.json
-eval_baseline/*.jsonl
+eval_baseline/
 !eval_baseline/*.example.json
 eval_data/
-*baseline*.json
-*_queries.json
 *.log
 .env
+
+# 运行时配置（含私有数据，推示例文件）
+exclude_ranges.json
 
 # 向量/BM25 索引（可重建）
 lancedb/
 data/lancedb/
+data/lancedb_backup_*/
 memory_db/
 
 # 用户数据
