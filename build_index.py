@@ -119,32 +119,111 @@ def parse_archive(filepath: str) -> list[dict]:
 
 
 # ─── 解析 JSONL 数据源 ───
+# assistant text块（如"已回复小九'在。'"）不索引：
+# 这是 Claude Code v2.1.183+ 引入的"无可见输出"注入的副作用文本，
+# 不是克实际发给小九的内容。实际发出的话在 tool_use 块（TG reply）里。
+# 参见 2026-08-05 的对话记录。
 def _extract_text_from_content(content) -> str:
-    """从 message.content 提取纯文本（跳过 tool_use / tool_result）。"""
+    """从 assistant message.content 提取实际发给小九的文本。
+
+    只提取 mcp__plugin_telegram_telegram__reply 的 tool_use 块中的
+    input.text 字段——这才是克真正说出口的话。
+    text 块是 Claude Code v2.1.183+ 的"无可见输出"注入副作用，不索引。
+    """
     if isinstance(content, str):
+        # 纯字符串：旧格式，可能是实际内容，保留
         return content
     if isinstance(content, list):
         parts = []
         for block in content:
             if isinstance(block, dict):
                 btype = block.get("type", "")
-                if btype in ("tool_use", "tool_result"):
-                    continue
-                if btype == "text":
-                    parts.append(block.get("text", ""))
-                elif btype == "thinking":
-                    continue
+                if btype == "tool_use":
+                    # 只提取 TG reply 的实际发送文本
+                    if block.get("name") == "mcp__plugin_telegram_telegram__reply":
+                        input_data = block.get("input", {})
+                        tg_text = input_data.get("text", "")
+                        if tg_text:
+                            parts.append(tg_text)
+                # text 块不索引（是 CC 注入的副作用描述，不是对话内容）
+                # tool_result / thinking 同样跳过
             elif isinstance(block, str):
                 parts.append(block)
         return "\n".join(p for p in parts if p).strip()
     return ""
 
 
+EXCLUDE_RANGES_PATH = os.path.join(os.path.dirname(__file__), "exclude_ranges.json")
+
+
+def _load_exclude_ranges() -> list[tuple[str, str]]:
+    """加载排除时间段配置，返回 [(start_iso, end_iso), ...] 列表。"""
+    try:
+        ranges = json.loads(Path(EXCLUDE_RANGES_PATH).read_text(encoding="utf-8"))
+        result = []
+        for r in ranges:
+            start = r.get("start", "")
+            end = r.get("end", "")
+            if start and end:
+                result.append((start, end))
+                print(f"  🚫 排除区间: {start} — {end} ({r.get('reason', '')})")
+        return result
+    except FileNotFoundError:
+        return []
+    except Exception as e:
+        print(f"  ⚠ 读取 exclude_ranges.json 失败: {e}")
+        return []
+
+
+def _normalize_ts(ts: str) -> str:
+    """统一 ISO 8601 时间戳格式：去掉毫秒，统一用 'Z' 结尾，便于字符串比较。"""
+    ts = ts.rstrip("Z").split(".")[0] + "Z"
+    return ts
+
+
+def _is_excluded(timestamp: str, exclude_ranges: list[tuple[str, str]]) -> bool:
+    """判断给定时间戳是否落在任一排除区间内。两端均归一化到秒精度再比较。"""
+    norm_ts = _normalize_ts(timestamp)
+    for start, end in exclude_ranges:
+        norm_start = _normalize_ts(start)
+        norm_end = _normalize_ts(end)
+        if norm_start <= norm_ts <= norm_end:
+            return True
+    return False
+
+
+_CHANNEL_RE = re.compile(r'<channel[^>]*>(.*?)</channel>', re.DOTALL)
+
+
+def _extract_user_channel_text(content) -> str:
+    """从 user 轮次的 content 中提取 <channel ...>...</channel> 标签内的文本（小九发来的消息）。"""
+    raw = ""
+    if isinstance(content, str):
+        raw = content
+    elif isinstance(content, list):
+        parts = []
+        for block in content:
+            if isinstance(block, dict) and block.get("type") == "text":
+                parts.append(block.get("text", ""))
+            elif isinstance(block, str):
+                parts.append(block)
+        raw = "\n".join(parts)
+
+    matches = _CHANNEL_RE.findall(raw)
+    return "\n".join(m.strip() for m in matches if m.strip())
+
+
 def parse_jsonl_dir(jsonl_dir: str) -> list[dict]:
     """
-    读取目录下所有 .jsonl，提取 role=assistant 的文本内容，
-    按 tiktoken 切块后返回 chunk 列表。
+    读取目录下所有 .jsonl，提取两类对话内容：
+    1. assistant 轮次：mcp__plugin_telegram_telegram__reply tool_use 块中的 input.text
+    2. user 轮次：<channel ...>...</channel> 标签内的文本
+    使用滑动窗口（size=5, step=3）将相邻消息合并为 chunk。
+    断窗条件：跨 session、时间间隔 >30 分钟、或进入 exclude_ranges 区间。
+    exclude_ranges 区间后的消息开新段，不与区间前的段合并。
     """
+    from datetime import timezone
+
     dirpath = Path(jsonl_dir)
     if not dirpath.exists():
         print(f"  ⚠ JSONL目录不存在，跳过: {jsonl_dir}")
@@ -155,12 +234,15 @@ def parse_jsonl_dir(jsonl_dir: str) -> list[dict]:
         print(f"  ⚠ 未找到 .jsonl 文件: {jsonl_dir}")
         return []
 
+    exclude_ranges = _load_exclude_ranges()
     print(f"  📄 找到 {len(jsonl_files)} 个 JSONL 文件")
-    chunks = []
+
+    # ── 1. 收集所有消息 ──
+    all_msgs = []
+    excluded_count = 0
 
     for jfile in jsonl_files:
         session_id = f"jsonl:{jfile.stem}"
-        assistant_texts = []
         try:
             for line in jfile.read_text(encoding="utf-8", errors="ignore").splitlines():
                 line = line.strip()
@@ -170,23 +252,131 @@ def parse_jsonl_dir(jsonl_dir: str) -> list[dict]:
                     obj = json.loads(line)
                 except json.JSONDecodeError:
                     continue
-                if obj.get("type") != "assistant":
+
+                obj_type = obj.get("type", "")
+                ts_full = obj.get("timestamp", "")
+                if not ts_full:
                     continue
-                msg = obj.get("message", {})
-                if msg.get("role") != "assistant":
-                    continue
-                text = _extract_text_from_content(msg.get("content", ""))
-                if text and len(text) >= 20:
-                    ts = obj.get("timestamp", "")[:10]
-                    assistant_texts.append((ts, text))
+
+                if obj_type == "assistant":
+                    msg = obj.get("message", {})
+                    if msg.get("role") != "assistant":
+                        continue
+                    excluded = exclude_ranges and _is_excluded(ts_full, exclude_ranges)
+                    if excluded:
+                        excluded_count += 1
+                    text = _extract_text_from_content(msg.get("content", ""))
+                    if text and len(text) >= 20:
+                        all_msgs.append({
+                            "ts": ts_full,
+                            "text": text,
+                            "session_id": session_id,
+                            "excluded": excluded,
+                        })
+
+                elif obj_type == "user":
+                    msg = obj.get("message", {})
+                    if msg.get("role") != "user":
+                        continue
+                    excluded = exclude_ranges and _is_excluded(ts_full, exclude_ranges)
+                    if excluded:
+                        excluded_count += 1
+                    text = _extract_user_channel_text(msg.get("content", ""))
+                    if text and len(text) >= 5:
+                        all_msgs.append({
+                            "ts": ts_full,
+                            "text": text,
+                            "session_id": session_id,
+                            "excluded": excluded,
+                        })
+
         except Exception as e:
             print(f"  ⚠ 读取 {jfile.name} 失败: {e}")
             continue
 
-        for ts, text in assistant_texts:
-            chunks.extend(_token_chunks(text, session_id, ts))
+    if excluded_count:
+        print(f"  🚫 已跳过 {excluded_count} 条被排除区间覆盖的消息")
 
-    print(f"  📦 JSONL解析完成，共 {len(chunks)} 个 chunk")
+    # ── 2. 按时间戳排序 ──
+    all_msgs.sort(key=lambda m: m["ts"])
+
+    # ── 3. 切段 ──
+    def _ts_diff_minutes(ts1: str, ts2: str) -> float:
+        def _parse(ts: str) -> datetime:
+            ts = ts.rstrip("Z").split(".")[0]
+            return datetime.fromisoformat(ts).replace(tzinfo=timezone.utc)
+        try:
+            return abs((_parse(ts2) - _parse(ts1)).total_seconds()) / 60
+        except Exception:
+            return 9999.0
+
+    segments: list[list[dict]] = []
+    current_seg: list[dict] = []
+    prev_was_excluded = False
+
+    for msg in all_msgs:
+        if msg["excluded"]:
+            # 跳过此消息；标记后面要开新段
+            if current_seg:
+                segments.append(current_seg)
+                current_seg = []
+            prev_was_excluded = True
+            continue
+
+        if not current_seg:
+            current_seg.append(msg)
+            prev_was_excluded = False
+            continue
+
+        prev = current_seg[-1]
+        # 断窗条件
+        if (msg["session_id"] != prev["session_id"]
+                or _ts_diff_minutes(prev["ts"], msg["ts"]) > 30):
+            segments.append(current_seg)
+            current_seg = [msg]
+        else:
+            current_seg.append(msg)
+        prev_was_excluded = False
+
+    if current_seg:
+        segments.append(current_seg)
+
+    print(f"  🔀 切成 {len(segments)} 个对话段")
+
+    # ── 4. 滑动窗口生成 chunk ──
+    WINDOW_SIZE = 3
+    STEP_SIZE = 2
+
+    seen_ids: set[str] = set()
+    chunks: list[dict] = []
+
+    for seg in segments:
+        start = 0
+        while start < len(seg):
+            end = min(start + WINDOW_SIZE, len(seg))
+            window = seg[start:end]
+            combined_text = "\n".join(m["text"] for m in window)
+            if len(combined_text.strip()) >= 20:
+                first = window[0]
+                chunk_id = hashlib.md5(
+                    f"{first['session_id']}:{first['ts']}:{combined_text[:80]}".encode()
+                ).hexdigest()
+                if chunk_id not in seen_ids:
+                    seen_ids.add(chunk_id)
+                    chunks.append({
+                        "chunk_id": chunk_id,
+                        "session_id": first["session_id"],
+                        "text": combined_text,
+                        "timestamp_start": first["ts"][:10],
+                        "timestamp_end": window[-1]["ts"][:10],
+                        "msg_count": len(window),
+                        "uuids": "[]",
+                    })
+            if end == len(seg):
+                break
+            start += STEP_SIZE
+
+    print(f"  📦 JSONL解析完成，共 {len(chunks)} 个 chunk（滑动窗口 size={WINDOW_SIZE} step={STEP_SIZE}）")
     return chunks
 
 
