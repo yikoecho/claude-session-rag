@@ -16,7 +16,7 @@ from http.server import BaseHTTPRequestHandler, HTTPServer
 from urllib.parse import urlparse, parse_qs
 
 from utils.config import PORT, RECALL_ENABLED, RECALL_MODEL
-from index.bm25 import build_bm25_index, bm25_search, reload_bm25_async
+from index.bm25 import build_bm25_index, bm25_search, bm25_aliases_fallback, reload_bm25_async
 from index.vector import vector_search_raw  # noqa: F401 — triggers LanceDB init
 from rag.hybrid import hybrid_search
 from rag.recall import recall_agent
@@ -73,6 +73,25 @@ class Handler(BaseHTTPRequestHandler):
                 results = []
                 print(f"[hybrid] 出错: {e}")
             body = json.dumps({"results": results}, ensure_ascii=False).encode("utf-8")
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json; charset=utf-8")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+            return
+
+        if parsed.path == "/bm25_aliases":
+            if not query:
+                self.send_response(400)
+                self.end_headers()
+                return
+            top_k = int(params.get("top_k", [5])[0])
+            try:
+                results = bm25_aliases_fallback(query, top_k)
+            except Exception as e:
+                results = []
+                print(f"[bm25_aliases] 出错: {e}")
+            body = json.dumps(results, ensure_ascii=False).encode("utf-8")
             self.send_response(200)
             self.send_header("Content-Type", "application/json; charset=utf-8")
             self.send_header("Content-Length", str(len(body)))
