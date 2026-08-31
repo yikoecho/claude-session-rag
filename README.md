@@ -20,9 +20,11 @@ Claude Code 的语义记忆召回系统。将你的对话历史建立索引，�
      additionalContext 注入到 Claude Code 提示词
 ```
 
-**主数据源：** `JSONL_DIR` 下的 `*.jsonl` 文件，由 Claude Code 自动生成，无需手动维护。把 `JSONL_DIR` 指向 `~/.claude/projects/` 下对应的子目录即可。
+**两路数据源互补，不分主次：**
 
-**辅助层（可选）：** `session_archive.md` 为 BM25 索引增加一层人工整理的摘要，适合有几百个 session 的长期项目。可以用 Stop hook 自动生成（见 `hooks/stop_archive.sh`）。
+- **`JSONL_DIR` 下的 `*.jsonl`**：Claude Code 自动写入的原始对话记录，覆盖所有消息，是技术细节、实现语言的主要来源。`build_index.py` 从中提取用户侧的 `<channel>` 标签内容和 assistant 侧的 `tool_use` 回复，滑动窗口切块后进 LanceDB 向量索引。**注意：** 从 Claude Code 2.1.183 起，若某轮没有可见 text 输出，系统会注入一句终端旁白（如"已回复用户"），这些旁白存在 `text` 块里而非 `tool_use` 块，`build_index.py` 会自动跳过。
+
+- **`session_archive.md`（可选）**：人工整理或 Stop hook 自动生成的摘要文件，为 BM25 增加一层语义压缩，适合情感类、关系类的召回——这类内容通常没有可搜的专有名词，靠摘要语义抽象才能命中。技术类召回主要靠 JSONL，不受影响。
 
 **实体提取：** `enrich_entities.py` 读取 `session_index.jsonl`（每行一个条目，含 `key`、`text`、`date` 字段），调用 LLM 提取命名实体，写回 `entities` 字段。这是 BM25 实体路径的基础——没有它，人名、技术术语、项目名等低频词的关键词召回基本不可用。
 
@@ -196,6 +198,16 @@ curl "http://127.0.0.1:15200/hybrid?q=你的查询&top_k=3"
 **`hooks/stop_archive.sh`**：session 结束时自动把摘要追加到 `session_archive.md`。需要 `RECALL_API_KEY`，安装为 `Stop` hook。
 
 **`hooks/notice_filter.py`**：消息门控规则。短消息（≤6字）直接 SKIP；7-15字需要检测到信号词（技术术语、情感词等）才继续；长消息直接通过。
+
+## Limitations
+
+**向量分数不能用来判断相关性。** bge-m3 对几乎任何中文输入都给出 ~0.5 的余弦相似度——索引里不存在的编造词是 0.50，真实命中是 0.54。差距不足以设阈值。空召回判断只能靠 BM25：命中给正常分数，零命中就是零命中。
+
+**RRF 融合分只反映排名，不反映匹配质量。** 分数是 `1/(60+rank)`，top-1 恒等于 0.0164，前几名全挤在 0.016–0.033。这个区间是 k=60 时 RRF 的全部值域，不管切块参数怎么调都不会变——用它评估检索质量是错的。指标应该是命中率和 MRR，不是分数分布。
+
+**chunk 不能切太碎。** 按单条消息切块会让平均长度掉到 80 字符左右，短文本的 embedding 语义信号很弱，容易被表面词汇主导。合并相邻消息成滑动窗口（当前默认 5 条/步长 3）之后，检索质量有明显改善。合并时注意断点：跨 session 不合并、时间间隔超 30 分钟不合并、exclude_ranges 跳过区间后不缝合。
+
+**词汇鸿沟真实存在。** 用户用生活语言提问（"那个排队的问题"），索引里存的是实现语言（函数名、错误信息、配置项），BM25 匹配不上，向量也桥不过去。aliases 字段是兜底——只在主路零命中时调用，不进主搜索池。根本解法是写入时就生成 aliases（"你以后会怎么称呼这件事"），历史记录可用 `enrich_entities.py` 批量回填。
 
 ## 已知问题
 
